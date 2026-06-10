@@ -1,5 +1,6 @@
-"""Loom CLI — the memory layer for AI coding agents."""
+"""Loom — AI coding agents that learn from every PR. One command after setup."""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -12,409 +13,341 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from .configs import update_agent_configs, AGENT_FILES
+from .extraction import extract_conventions, _extract_with_keywords
+from .github import GitHubClient
+
 console = Console()
-
-LOOM_DIR_NAME = ".loom"
-SUPPORTED_AGENTS = ["claude", "codex"]
-MAX_CONVENTIONS_CHARS = 2000
+LOOM_DIR = ".loom"
+AUTH_FILE = Path.home() / ".loom" / "auth.json"
 
 
-@click.group()
-def main():
-    """Loom — AI coding agents that get smarter with every PR."""
+@click.group(invoke_without_command=True)
+@click.pass_context
+def main(ctx):
+    """Loom — AI coding agents that get smarter with every PR.
+
+    Run without arguments to auto-learn from closed PRs.
+    """
+    if ctx.invoked_subcommand is None:
+        asyncio.run(_auto())
 
 
-# ── helpers ──────────────────────────────────────────────────────────
+# ── auto mode ──────────────────────────────────────────────────────
 
 
-def _loom_dir() -> Path:
-    return Path.cwd() / LOOM_DIR_NAME
+async def _auto():
+    repo = _detect_repo()
+    token = _get_token()
+
+    if not _loom_dir().exists():
+        _bootstrap()
+        return
+
+    with console.status("[dim]Checking for PRs to learn from...[/dim]"):
+        gh = GitHubClient(token, repo)
+        count = await _auto_learn(gh, repo)
+
+    if count:
+        console.print(f"[green]Learned from {count} new PR(s).[/green]\n")
+    else:
+        console.print("[dim]Nothing new to learn.[/dim]\n")
+
+    _show_state()
+
+    if not _read_history():
+        console.print(
+            "[dim]Create a PR with Claude Code, review it, then run [bold]loom[/bold] again.[/dim]"
+        )
 
 
-def _require_loom() -> Path:
-    p = _loom_dir()
-    if not p.exists():
-        console.print("[red]Run [bold]loom init[/bold] first.[/red]")
-        raise SystemExit(1)
-    return p
+async def _auto_learn(gh, repo):
+    if not repo:
+        return 0
+
+    loom_dir = _loom_dir()
+    known = _known_prs()
+
+    try:
+        async with httpx.AsyncClient(headers=gh._headers, timeout=15) as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repo}/pulls",
+                params={"state": "all", "sort": "updated", "direction": "desc", "per_page": 20},
+            )
+            resp.raise_for_status()
+            prs = resp.json()
+    except Exception:
+        return 0
+
+    count = 0
+    for pr in prs:
+        pr_num = pr["number"]
+        if pr_num in known:
+            continue
+
+        if pr["merged_at"]:
+            outcome = "accepted"
+        elif pr["state"] == "closed":
+            outcome = "rejected"
+        else:
+            continue
+
+        comments = await gh.get_pr_comments(pr_num)
+        diff = ""
+        try:
+            diff = await gh.get_pr_diff(pr_num)
+        except Exception:
+            pass
+
+        conventions = []
+        if outcome == "rejected" and comments:
+            conventions = await extract_conventions(comments, diff)
+
+        _save_pr_entry(pr_num, repo, outcome, comments, conventions)
+        count += 1
+
+    # Update local agent config files with all accumulated conventions
+    if count:
+        _update_local_configs()
+
+    return count
 
 
-def _detect_repo() -> str | None:
-    """Extract owner/repo from the git remote."""
+# ── bootstrap ──────────────────────────────────────────────────────
+
+
+def _bootstrap():
+    console.print("[bold]Welcome to Loom![/bold]\n")
+
+    loom_dir = _loom_dir()
+    loom_dir.mkdir(exist_ok=True)
+
+    (loom_dir / "rules.json").write_text(json.dumps({"rules": []}, indent=2))
+    (loom_dir / "history.jsonl").write_text("")
+    (loom_dir / "conventions.md").write_text(
+        "# Loom Conventions\n\n"
+        "Not learned yet. Run agents, review PRs, then run `loom`.\n"
+    )
+
+    # Auth
+    token = _get_token()
+
+    # Inject into CLAUDE.md if it exists
+    claude_md = Path.cwd() / "CLAUDE.md"
+    if claude_md.exists():
+        from .configs import _build_section
+        section = _build_section([])
+        content = claude_md.read_text()
+        if "LOOM:START" not in content:
+            claude_md.write_text(content.rstrip() + "\n\n" + section + "\n")
+            console.print("[dim]Injected conventions section into CLAUDE.md[/dim]")
+
+    console.print(Panel.fit(
+        "[green]Loom is ready.[/green]\n\n"
+        f"  Conventions injected into: {', '.join(AGENT_FILES)}\n"
+        "  Loom learns from every PR. No extra commands.\n\n"
+        "  1. Create a PR with Claude Code or Codex\n"
+        "  2. Review it — leave comments if you reject it\n"
+        "  3. Run [bold]loom[/bold]\n\n"
+        "That's it. Conventions auto-injected into agent configs.",
+        title="Done"
+    ))
+
+
+# ── commands ───────────────────────────────────────────────────────
+
+
+@main.command()
+def init():
+    """Set up Loom — one command, then agents learn from every PR."""
+    if _loom_dir().exists():
+        console.print("[yellow]Already set up. Run [bold]loom[/bold].[/yellow]")
+        return
+    _bootstrap()
+
+
+@main.command()
+def stats():
+    """Show what Loom has learned."""
+    _show_state()
+
+
+# ── auth ───────────────────────────────────────────────────────────
+
+
+def _load_token():
+    if AUTH_FILE.exists():
+        try:
+            return json.loads(AUTH_FILE.read_text()).get("token")
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return None
+
+
+def _save_token(token):
+    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    AUTH_FILE.write_text(json.dumps(
+        {"token": token, "saved_at": datetime.now(timezone.utc).isoformat()}, indent=2
+    ))
+    AUTH_FILE.chmod(0o600)
+
+
+def _get_token():
+    t = _load_token() or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if t:
+        return t
+    try:
+        result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            _save_token(result.stdout.strip())
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    console.print("[red]Run [bold]gh auth login[/bold] or set GITHUB_TOKEN.[/red]")
+    raise SystemExit(1)
+
+
+# ── helpers ────────────────────────────────────────────────────────
+
+
+def _loom_dir():
+    return Path.cwd() / LOOM_DIR
+
+
+def _detect_repo():
     try:
         url = subprocess.check_output(
             ["git", "remote", "get-url", "origin"], text=True, stderr=subprocess.DEVNULL
         ).strip()
-        # git@github.com:owner/repo.git  or  https://github.com/owner/repo.git
         for prefix in ["git@github.com:", "https://github.com/"]:
             if prefix in url:
-                path = url.split(prefix)[1].removesuffix(".git")
-                return path
+                return url.split(prefix)[1].removesuffix(".git")
     except subprocess.CalledProcessError:
         pass
     return None
 
 
-def _github_token() -> str:
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if not token:
-        console.print("[red]Set [bold]GITHUB_TOKEN[/bold] or [bold]GH_TOKEN[/bold] in your environment.[/red]")
-        raise SystemExit(1)
-    return token
-
-
-# ── commands ─────────────────────────────────────────────────────────
-
-
-@main.command()
-def init():
-    """Initialize Loom in the current project."""
-    loom_dir = _loom_dir()
-
-    if loom_dir.exists():
-        console.print("[yellow].loom/ already exists.[/yellow]")
-        return
-
-    loom_dir.mkdir()
-
-    rules = {"rules": []}
-    (loom_dir / "rules.json").write_text(json.dumps(rules, indent=2))
-
-    (loom_dir / "conventions.md").write_text(
-        "# Loom Conventions\n\n"
-        "No conventions learned yet.\n"
-        "Run an agent with [bold]loom run[/bold], "
-        "then use [bold]loom learn[/bold] to build project memory.\n"
-    )
-
-    (loom_dir / "history.jsonl").write_text("")
-
-    console.print(Panel.fit(
-        "[green]Loom initialized[/green]\n\n"
-        "  conventions.md   injected into every agent run\n"
-        "  rules.json       structured rules with confidence scores\n"
-        "  history.jsonl    record of every PR outcome",
-        title=".loom/"
-    ))
-
-
-@main.command()
-@click.argument("agent")
-@click.argument("task")
-def run(agent, task):
-    """Run a coding agent with Loom conventions injected.
-
-    AGENT: 'claude' or 'codex'
-    TASK: the prompt (wrap in quotes, e.g. "fix the login bug")
-    """
-    if agent not in SUPPORTED_AGENTS:
-        console.print(f"[red]Unknown agent '{agent}'. Supported: {', '.join(SUPPORTED_AGENTS)}[/red]")
-        raise SystemExit(1)
-
-    loom_dir = _require_loom()
-    conventions = (loom_dir / "conventions.md").read_text().strip()
-
-    header = "Project conventions (learned by Loom from past PR feedback):"
-    prompt = f"{header}\n\n{conventions}\n\n---\n\nTask: {task}"
-
-    cmd = ["claude", "-p", prompt] if agent == "claude" else ["codex", "exec", prompt]
-
-    # Record the run for loom learn --last
-    last_run = {
-        "agent": agent,
-        "task": task,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    (loom_dir / "last-run.json").write_text(json.dumps(last_run, indent=2))
-
-    has_conventions = "No conventions learned yet" not in conventions
-    ctx_note = "[green]conventions injected[/green]" if has_conventions else "[dim]no conventions yet[/dim]"
-    console.print(f"[dim]Running {agent} ({ctx_note})...[/dim]\n")
-
-    result = subprocess.run(cmd)
-    code = result.returncode
-
-    console.print(f"\n[dim]Agent exited with code {code}.[/dim]")
-    if code == 0:
-        repo = _detect_repo()
-        repo_flag = f"--repo {repo}" if repo else "--repo owner/name"
-        console.print(
-            f"[yellow]If this created a PR, run:[/yellow]\n"
-            f"  [bold]loom learn --pr <number> --outcome accepted {repo_flag}[/bold]\n"
-            f"  [bold]loom learn --pr <number> --outcome rejected {repo_flag}[/bold]"
-        )
-    raise SystemExit(code)
-
-
-@main.command()
-@click.option("--pr", type=int, required=True, help="PR number")
-@click.option("--outcome", type=click.Choice(["accepted", "rejected"]), required=True)
-@click.option("--repo", default=None, help="GitHub repo as owner/name (auto-detected if omitted)")
-@click.option("--comments/--no-comments", default=True, help="Fetch review comments (default: yes)")
-def learn(pr, outcome, repo, comments):
-    """Learn from a PR — update conventions from accept/reject feedback."""
-    token = _github_token()
-
-    if repo is None:
-        repo = _detect_repo()
-        if repo is None:
-            console.print("[red]Could not detect repo. Pass [bold]--repo owner/name[/bold].[/red]")
-            raise SystemExit(1)
-
-    loom_dir = _require_loom()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "loom-agent",
-    }
-
-    console.print(f"[dim]Fetching PR #{pr} from {repo}...[/dim]")
-
-    with httpx.Client(headers=headers) as client:
-        # PR diff
-        diff_resp = client.get(
-            f"https://api.github.com/repos/{repo}/pulls/{pr}",
-            headers={**headers, "Accept": "application/vnd.github.diff"},
-        )
-        if diff_resp.status_code == 404:
-            console.print(f"[red]PR #{pr} not found in {repo}.[/red]")
-            raise SystemExit(1)
-        diff_resp.raise_for_status()
-        diff = diff_resp.text
-
-        # Review comments
-        review_comments = []
-        if comments:
+def _known_prs():
+    history = _loom_dir() / "history.jsonl"
+    if not history.exists():
+        return set()
+    known = set()
+    for line in history.read_text().splitlines():
+        if line.strip():
             try:
-                cmt_resp = client.get(f"https://api.github.com/repos/{repo}/pulls/{pr}/comments")
-                cmt_resp.raise_for_status()
-                review_comments = [c["body"] for c in cmt_resp.json()]
-            except httpx.HTTPError:
-                console.print("[dim]Could not fetch review comments.[/dim]")
+                known.add(json.loads(line)["pr"])
+            except (json.JSONDecodeError, KeyError):
+                pass
+    return known
 
-    # Build history entry
+
+def _save_pr_entry(pr_num, repo, outcome, comments, conventions):
     entry = {
-        "pr": pr,
-        "repo": repo,
-        "outcome": outcome,
+        "pr": pr_num, "repo": repo, "outcome": outcome,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "diff_size_bytes": len(diff),
-        "review_comments": review_comments,
-        "rules_extracted": [],
+        "review_comments": comments,
+        "conventions": conventions,
     }
-
-    # Extraction
-    if outcome == "rejected" and review_comments:
-        rules = _extract_rules(review_comments)
-        entry["rules_extracted"] = rules
-        _update_rules(loom_dir, rules)
-    elif outcome == "accepted":
-        _boost_accepted_patterns(loom_dir)
-
-    # Append history
-    history_path = loom_dir / "history.jsonl"
-    with open(history_path, "a") as f:
+    with open(_loom_dir() / "history.jsonl", "a") as f:
         f.write(json.dumps(entry) + "\n")
 
-    # Regenerate conventions
-    _regenerate_conventions(loom_dir)
 
-    status = "[green]accepted" if outcome == "accepted" else "[red]rejected"
-    console.print(f"PR #{pr} → {status}[/]")
-    if entry["rules_extracted"]:
-        for r in entry["rules_extracted"]:
-            console.print(f"  + {r['type']}: {r['pattern'][:80]}")
-    console.print(f"  [dim]Total PRs learned: {_count_history(loom_dir)}[/dim]")
+def _read_history():
+    history = _loom_dir() / "history.jsonl"
+    if not history.exists():
+        return []
+    entries = []
+    for line in history.read_text().splitlines():
+        if line.strip():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return entries
 
 
-@main.command()
-def stats():
-    """Show PR acceptance trend and active conventions."""
-    loom_dir = _require_loom()
-    history_path = loom_dir / "history.jsonl"
+def _update_local_configs():
+    """Update CLAUDE.md, AGENTS.md, .cursorrules locally with all learned conventions."""
+    from .configs import _build_section, LOOM_START, LOOM_END
+    import re
 
-    if not history_path.exists() or history_path.stat().st_size == 0:
-        console.print("[dim]No PR history. Use [bold]loom learn[/bold] to add entries.[/dim]")
+    history = _read_history()
+    all_conventions = []
+    for e in history:
+        all_conventions.extend(e.get("conventions", []))
+
+    # Deduplicate by rule text
+    seen = set()
+    unique = []
+    for c in all_conventions:
+        rule = c.get("rule", "")
+        if rule and rule not in seen:
+            seen.add(rule)
+            unique.append(c)
+
+    section = _build_section(unique)
+
+    for filename in AGENT_FILES:
+        path = Path.cwd() / filename
+        if path.exists():
+            content = path.read_text()
+            if LOOM_START in content:
+                content = re.sub(
+                    re.escape(LOOM_START) + r".*?" + re.escape(LOOM_END),
+                    section, content, flags=re.DOTALL
+                )
+            else:
+                content = content.rstrip() + "\n\n" + section + "\n"
+        else:
+            content = section + "\n"
+
+        path.write_text(content)
+
+    if unique:
+        console.print(f"[dim]Updated {len(AGENT_FILES)} agent config files with {len(unique)} conventions[/dim]")
+
+
+def _show_state():
+    history = _read_history()
+    if not history:
+        console.print("[dim]No PRs learned from yet.[/dim]")
         return
 
-    entries = _read_history(loom_dir)
-    accepted = sum(1 for e in entries if e["outcome"] == "accepted")
-    rejected = sum(1 for e in entries if e["outcome"] == "rejected")
-    total = len(entries)
-    rate = (accepted / total * 100) if total > 0 else 0
+    accepted = sum(1 for e in history if e["outcome"] == "accepted")
+    rejected = sum(1 for e in history if e["outcome"] == "rejected")
+    total = len(history)
+    rate = accepted / total * 100 if total else 0
 
-    table = Table(title="PR History")
-    table.add_column("Metric", style="dim")
-    table.add_column("Value", justify="right")
-    table.add_row("Total PRs", str(total))
+    table = Table(title="Learning Progress")
+    table.add_column("", style="dim")
+    table.add_column("", justify="right")
+    table.add_row("PRs learned from", str(total))
     table.add_row("Accepted", f"[green]{accepted}[/green]")
     table.add_row("Rejected", f"[red]{rejected}[/red]")
     table.add_row("Acceptance rate", f"{rate:.0f}%")
 
-    # Trend: split into first half vs second half
     if total >= 4:
         mid = total // 2
-        first = entries[:mid]
-        second = entries[mid:]
-        first_rate = sum(1 for e in first if e["outcome"] == "accepted") / len(first) * 100
-        second_rate = sum(1 for e in second if e["outcome"] == "accepted") / len(second) * 100
-        trend = "[green]↑[/green]" if second_rate > first_rate else "[red]↓[/red]" if second_rate < first_rate else "[dim]→[/dim]"
-        table.add_row(
-            f"Trend (first {len(first)} vs last {len(second)})",
-            f"{first_rate:.0f}% → {second_rate:.0f}% {trend}",
-        )
-
+        first_rate = sum(1 for e in history[:mid] if e["outcome"] == "accepted") / mid * 100
+        second_rate = sum(1 for e in history[mid:] if e["outcome"] == "accepted") / (total - mid) * 100
+        trend = "↑" if second_rate > first_rate else "↓" if second_rate < first_rate else "→"
+        color = "green" if second_rate >= first_rate else "red"
+        table.add_row(f"Trend", f"{first_rate:.0f}% → {second_rate:.0f}% [{color}]{trend}[/{color}]")
     console.print(table)
 
-    # Active conventions
-    rules_path = loom_dir / "rules.json"
-    if rules_path.exists():
-        rules = json.loads(rules_path.read_text()).get("rules", [])
-        active = sorted(
-            [r for r in rules if r.get("confidence", 0) >= 3],
-            key=lambda x: x.get("confidence", 0),
-            reverse=True,
-        )
-        if active:
-            console.print("\n[bold]Active conventions (confidence ≥ 3):[/bold]")
-            for r in active:
-                bar = "█" * r["confidence"]
-                console.print(
-                    f"  [{r.get('type', '?')}] {r['pattern'][:80]}\n"
-                    f"     confidence: [green]{bar}[/green] {r['confidence']}/10"
-                )
+    # Show conventions learned
+    all_conventions = []
+    for e in history:
+        all_conventions.extend(e.get("conventions", []))
 
-    # Show all rules including low-confidence
-    if rules_path.exists():
-        rules = json.loads(rules_path.read_text()).get("rules", [])
-        learning = [r for r in rules if r.get("confidence", 0) < 3]
-        if learning:
-            console.print(f"\n[dim]Learning ({len(learning)} patterns need more confirmations):[/dim]")
-            for r in learning:
-                console.print(f"  [dim][{r.get('type', '?')}] {r['pattern'][:60]} (confidence: {r['confidence']}/10)[/dim]")
-
-
-@main.command()
-def conventions():
-    """Show current conventions that will be injected."""
-    loom_dir = _require_loom()
-    content = (loom_dir / "conventions.md").read_text()
-    console.print(Panel.fit(content, title=".loom/conventions.md"))
-
-
-# ── extraction engine (v1 — keyword-based) ──────────────────────────
-
-
-RULE_PATTERNS = {
-    "type-annotation": ["type hint", "type annotation", "typing", "mypy", ": str", ": int", "return type"],
-    "indent-style": ["tab", "space", "indent", "formatting"],
-    "import-convention": ["absolute import", "relative import", "import order", "isort"],
-    "test-location": ["__tests__", "test file", "test directory", "conftest", "test alongside"],
-    "error-handling": ["error handling", "result type", "try-except", "unwrap", "panic"],
-    "naming": ["camelCase", "snake_case", "PascalCase", "naming convention", "rename"],
-}
-
-
-def _extract_rules(comments):
-    extracted = []
-    seen = set()
-    for comment in comments:
-        lower = comment.lower()
-        for rule_type, keywords in RULE_PATTERNS.items():
-            if rule_type in seen:
-                continue
-            for kw in keywords:
-                if kw in lower:
-                    extracted.append({
-                        "type": rule_type,
-                        "pattern": comment.strip()[:120],
-                        "confidence": 1,
-                        "source": "review_comment",
-                        "times_confirmed": 1,
-                        "times_rejected": 0,
-                    })
-                    seen.add(rule_type)
-                    break
-    return extracted
-
-
-def _update_rules(loom_dir, new_rules):
-    rules_path = loom_dir / "rules.json"
-    existing = json.loads(rules_path.read_text()) if rules_path.exists() else {"rules": []}
-
-    for new_rule in new_rules:
-        found = False
-        for existing_rule in existing["rules"]:
-            if existing_rule.get("type") == new_rule["type"]:
-                existing_rule["confidence"] = min(10, existing_rule.get("confidence", 1) + 1)
-                existing_rule["times_confirmed"] = existing_rule.get("times_confirmed", 0) + 1
-                found = True
-                break
-        if not found:
-            existing["rules"].append(new_rule)
-
-    rules_path.write_text(json.dumps(existing, indent=2))
-
-
-def _boost_accepted_patterns(loom_dir):
-    """When a PR is accepted, slightly boost all active rules — the patterns worked."""
-    rules_path = loom_dir / "rules.json"
-    if not rules_path.exists():
-        return
-    existing = json.loads(rules_path.read_text())
-    for rule in existing.get("rules", []):
-        if rule.get("confidence", 0) >= 3:
-            rule["confidence"] = min(10, rule["confidence"] + 1)
-    rules_path.write_text(json.dumps(existing, indent=2))
-
-
-def _regenerate_conventions(loom_dir):
-    rules_path = loom_dir / "rules.json"
-    if not rules_path.exists():
-        return
-
-    rules = json.loads(rules_path.read_text()).get("rules", [])
-    active = sorted(
-        [r for r in rules if r.get("confidence", 0) >= 3],
-        key=lambda x: x.get("confidence", 0),
-        reverse=True,
-    )
-
-    lines = ["# Loom Conventions\n"]
-    if not active:
-        lines.append(
-            "No high-confidence conventions yet (need 3+ confirmations per pattern).\n"
-            "Keep running agents and using `loom learn`.\n"
-        )
-    else:
-        lines.append(
-            "These conventions were learned from PR feedback.\n"
-            "They are injected into every agent run.\n"
-        )
-        for r in active:
-            lines.append(f"- **{r['type']}**: {r['pattern']} (confidence: {r['confidence']}/10, confirmed {r.get('times_confirmed', '?')}x)")
-
-    body = "\n".join(lines)
-    if len(body) > MAX_CONVENTIONS_CHARS:
-        body = body[:MAX_CONVENTIONS_CHARS].rsplit("\n", 1)[0] + "\n"
-        body += "\n*(truncated — oldest/lowest-confidence conventions removed)*\n"
-
-    (loom_dir / "conventions.md").write_text(body)
-
-
-def _read_history(loom_dir):
-    entries = []
-    history_path = loom_dir / "history.jsonl"
-    if history_path.exists():
-        with open(history_path) as f:
-            for line in f:
-                if line.strip():
-                    entries.append(json.loads(line))
-    return entries
-
-
-def _count_history(loom_dir):
-    return len(_read_history(loom_dir))
+    if all_conventions:
+        console.print(f"\n[bold]Conventions learned ({len(all_conventions)} total):[/bold]")
+        seen = set()
+        for c in all_conventions:
+            rule = c.get("rule", c.get("pattern", ""))
+            if rule and rule not in seen:
+                seen.add(rule)
+                console.print(f"  - {rule[:100]}")
 
 
 if __name__ == "__main__":
