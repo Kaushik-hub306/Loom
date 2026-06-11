@@ -307,3 +307,55 @@ rule_types:
 def create_loom_server(project_root: Path) -> LoomMCPServer:
     """Create a Loom MCP server pointed at a project root."""
     return LoomMCPServer(Path(project_root))
+
+
+def main():
+    """Start the Loom MCP server via stdio transport."""
+    from mcp.server.fastmcp import FastMCP
+
+    project_root = Path(os.environ.get("LOOM_PROJECT_ROOT", os.getcwd()))
+    loom = create_loom_server(project_root)
+
+    mcp = FastMCP("loom")
+
+    @mcp.tool(
+        name="recall_memory",
+        description="Search learned conventions and rules",
+    )
+    async def recall_memory(
+        query: str,
+        domain: str | None = None,
+        min_confidence: int = 1,
+        limit: int | None = None,
+    ) -> str:
+        result = loom._handle_recall(
+            loom.store,
+            {"query": query, "domain": domain, "min_confidence": min_confidence, "limit": limit},
+        )
+        return result[0].text
+
+    @mcp.tool(
+        name="store_outcome",
+        description="Store a PR outcome and learn from feedback",
+    )
+    async def store_outcome(
+        domain: str,
+        outcome: str,
+        feedback: str,
+        source_url: str = "",
+    ) -> str:
+        result = loom._handle_store(
+            loom.store,
+            {"domain": domain, "outcome": outcome, "feedback": feedback, "source_url": source_url},
+        )
+        return result[0].text
+
+    @mcp.tool(
+        name="get_stats",
+        description="Get statistics about learned rules",
+    )
+    async def get_stats(domain: str | None = None) -> str:
+        result = loom._handle_stats(loom.store, {"domain": domain})
+        return result[0].text
+
+    mcp.run(transport="stdio")
