@@ -11,6 +11,12 @@ dependencies = [
     "uvicorn>=0.34",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
 ]
 
 [project.scripts]
@@ -20,3 +26,6 @@ loom-server = "loom.server:main"
 [build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["loom*"]
