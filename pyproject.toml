@@ -19,9 +19,6 @@ dev = [
     "pytest>=8.0",
 ]
 
-[project.scripts]
-loom = "loom.cli:main"
-loom-server = "loom.server:main"
 
 [build-system]
 requires = ["setuptools>=75"]
