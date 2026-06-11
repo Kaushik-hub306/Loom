@@ -1,14 +1,7 @@
-"""Loom engine — rule storage, domain extraction, and decay management."""
-from loom.engine.rule_store import RuleStore, Rule, RuleStatus, Domain
-from loom.engine.extractor import DomainExtractor, ExtractionResult
-from loom.engine.decay import DecayManager
+"""Loom engine — RuleStore, DomainExtractor, DecayManager."""
 
-__all__ = [
-    "RuleStore",
-    "Rule",
-    "RuleStatus",
-    "Domain",
-    "DomainExtractor",
-    "ExtractionResult",
-    "DecayManager",
-]
+from .rule_store import RuleStore, Rule
+from .domain_extractor import DomainExtractor
+from .decay_manager import DecayManager
+
+__all__ = ["RuleStore", "Rule", "DomainExtractor", "DecayManager"]

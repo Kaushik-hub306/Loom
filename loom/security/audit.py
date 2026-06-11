@@ -1,76 +1,41 @@
-"""Append-only mutation log for the memory store."""
+"""AuditLog — records all operations for accountability."""
 
-import enum
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 
-AUDIT_FILE = "audit.jsonl"
+class AuditLog:
+    """Append-only audit log of all Loom operations."""
 
+    def __init__(self, log_path: Path):
+        self.log_path = Path(log_path)
 
-class AuditAction(enum.Enum):
-    RULE_CREATED = "rule_created"
-    RULE_PROMOTED = "rule_promoted"
-    RULE_DEMOTED = "rule_demoted"
-    RULE_ARCHIVED = "rule_archived"
-    SECRETS_REDACTED = "secrets_redacted"
+    def record(self, action: str, details: dict | None = None):
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": action,
+            "details": details or {},
+        }
+        line = json.dumps(entry)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.log_path, "a") as f:
+            f.write(line + "\n")
 
+    def read(self, limit: int = 100) -> list[dict]:
+        if not self.log_path.exists():
+            return []
+        entries = []
+        with open(self.log_path) as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        return entries[-limit:]
 
-def _audit_path() -> Path:
-    store_dir = Path(os.environ.get("LOOM_STORE_DIR", Path.cwd() / ".loom"))
-    return store_dir / AUDIT_FILE
-
-
-def log(action: AuditAction, actor: str, metadata: dict | None = None) -> None:
-    """Append one audit entry to the append-only log."""
-    entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "action": action.value,
-        "actor": actor,
-        "metadata": metadata or {},
-    }
-    path = _audit_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as fh:
-        fh.write(json.dumps(entry) + "\n")
-
-
-def verify_audit_invariants(store_path: Path | None = None) -> tuple[bool, str]:
-    """Check hard invariants across the audit log.
-
-    Invariant: a rule must not be 'created' after it has been 'archived'.
-    Returns (valid, message).
-    """
-    path = _audit_path() if store_path is None else store_path / AUDIT_FILE
-    if not path.exists():
-        return True, "No audit log — nothing to verify."
-
-    archived: set[str] = set()
-    created: set[str] = set()
-
-    for line in path.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        action = entry.get("action", "")
-        meta = entry.get("metadata", {})
-        rule_id = meta.get("rule_id") or meta.get("rule", "")
-
-        if action == AuditAction.RULE_ARCHIVED.value and rule_id:
-            archived.add(rule_id)
-
-        if action == AuditAction.RULE_CREATED.value and rule_id:
-            if rule_id in archived:
-                return False, (
-                    f"Audit invariant violated: rule '{rule_id}' was created "
-                    f"at {entry['timestamp']} after it was already archived."
-                )
-            created.add(rule_id)
-
-    return True, "Audit invariants hold."
+    def count(self) -> int:
+        if not self.log_path.exists():
+            return 0
+        return sum(1 for _ in open(self.log_path))
