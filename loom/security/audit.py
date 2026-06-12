@@ -1,8 +1,60 @@
 """AuditLog — records all operations for accountability."""
 
 import json
+import os
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
+
+
+class AuditAction(str, Enum):
+    RULE_CREATED = "rule_created"
+    RULE_PROMOTED = "rule_promoted"
+    RULE_DEMOTED = "rule_demoted"
+    RULE_ARCHIVED = "rule_archived"
+
+
+def _audit_log_path() -> Path:
+    return Path(os.environ["LOOM_STORE_DIR"]) / "audit.jsonl"
+
+
+def log(action: AuditAction, agent: str, details: dict) -> None:
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": action.value if isinstance(action, AuditAction) else action,
+        "agent": agent,
+        "details": details,
+    }
+    p = _audit_log_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def verify_audit_invariants() -> tuple[bool, str]:
+    p = _audit_log_path()
+    if not p.exists():
+        return True, "No audit log — nothing to verify"
+
+    entries = []
+    with open(p) as f:
+        for line in f:
+            if line.strip():
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+
+    archived_ids = set()
+    for e in entries:
+        rid = e.get("details", {}).get("rule_id", "")
+        action = e.get("action", "")
+        if action == "rule_archived":
+            archived_ids.add(rid)
+        if action == "rule_created" and rid in archived_ids:
+            return False, f"Invariant violation: {rid} created after archival"
+
+    return True, "All audit invariants hold"
 
 
 class AuditLog:
