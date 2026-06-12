@@ -1,16 +1,29 @@
-"""RuleStore — persistent, searchable store of learned conventions."""
+"""RuleStore — DEPRECATED adapter that wraps ObservationStore / Observation.
 
-import json
-import re
-import uuid
+The ``Rule`` dataclass and ``RuleStore`` class are being replaced by the richer
+``Observation`` / ``ObservationStore`` in Loom v2.  This module now provides
+backward-compatible shims that delegate to the new classes and emit
+``FutureWarning`` so callers can migrate.
+"""
+
+from __future__ import annotations
+
+import warnings
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
+
+from .observation import Observation
+from .observation_store import ObservationStore as _ObservationStore
+
+
+# ── Deprecated Rule dataclass ────────────────────────────────────────────────
+# We keep the original Rule dataclass for type compatibility, but all
+# construction goes through Observation now.
 
 
 @dataclass
 class Rule:
-    """A single learned convention rule."""
+    """DEPRECATED — use ``Observation`` instead."""
 
     id: str
     domain: str
@@ -26,6 +39,11 @@ class Rule:
     updated_at: str = ""
 
     def to_dict(self) -> dict:
+        warnings.warn(
+            "Rule.to_dict() is deprecated; use Observation.to_dict() instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
         return {
             "id": self.id,
             "domain": self.domain,
@@ -43,58 +61,112 @@ class Rule:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Rule":
-        # Backward compat: migrate old "source_urls" key to "sources"
-        sources = d.get("sources", d.get("source_urls", []))
+        warnings.warn(
+            "Rule.from_dict() is deprecated; use Observation.from_dict() instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
+        obs = Observation.from_dict(d)
+        # Merge main's sources/source_type fields
+        sources = list(d.get("sources", d.get("source_urls", obs.source_urls)))
         return cls(
-            id=d["id"],
-            domain=d["domain"],
-            rule_type=d["rule_type"],
-            rule=d.get("rule", d.get("pattern", "")),
-            example=d.get("example", ""),
-            confidence=d.get("confidence", 5),
-            times_confirmed=d.get("times_confirmed", 0),
-            times_violated=d.get("times_violated", 0),
+            id=obs.id,
+            domain=obs.domain,
+            rule_type=obs.category,
+            rule=obs.content,
+            example=obs.context.get("example", ""),
+            confidence=obs.confidence,
+            times_confirmed=obs.times_confirmed,
+            times_violated=obs.times_violated,
             sources=sources,
             source_type=d.get("source_type", ""),
-            created_at=d.get("created_at", ""),
-            updated_at=d.get("updated_at", ""),
+            created_at=obs.created_at,
+            updated_at=obs.updated_at,
+        )
+
+    @classmethod
+    def from_observation(cls, obs: Observation) -> "Rule":
+        """Convert an Observation to the legacy Rule shape (no warning)."""
+        return cls(
+            id=obs.id,
+            domain=obs.domain,
+            rule_type=obs.category,
+            rule=obs.content,
+            example=obs.context.get("example", ""),
+            confidence=obs.confidence,
+            times_confirmed=obs.times_confirmed,
+            times_violated=obs.times_violated,
+            sources=list(obs.source_urls),
+            source_type="",
+            created_at=obs.created_at,
+            updated_at=obs.updated_at,
+        )
+
+    def to_observation(self) -> Observation:
+        """Convert this Rule to an Observation (no warning)."""
+        return Observation(
+            id=self.id,
+            observation_type="rule",
+            domain=self.domain,
+            category=self.rule_type,
+            content=self.rule,
+            context={"example": self.example, "source_type": self.source_type} if self.source_type else {"example": self.example},
+            confidence=self.confidence,
+            times_confirmed=self.times_confirmed,
+            times_violated=self.times_violated,
+            source_urls=list(self.sources),
+            created_at=self.created_at,
+            updated_at=self.updated_at,
         )
 
 
+# ── Deprecated RuleStore class ───────────────────────────────────────────────
+
+
 class RuleStore:
-    """Persistent store of convention rules backed by a JSON file."""
+    """DEPRECATED — wraps ``ObservationStore``.  Emits ``FutureWarning``."""
 
     def __init__(self, path: Path):
-        self.path = Path(path)
-        self.rules: dict[str, Rule] = {}
-        if self.path.exists():
-            self._load()
+        warnings.warn(
+            "RuleStore is deprecated; use ObservationStore instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
+        # Point at the new store.json; ObservationStore handles migration
+        store_path = Path(path)
+        if store_path.name == "rules.json":
+            store_path = store_path.parent / "store.json"
+        self._store = _ObservationStore(store_path)
 
-    def _load(self):
-        try:
-            data = json.loads(self.path.read_text())
-            for rule_dict in data.get("rules", []):
-                rule = Rule.from_dict(rule_dict)
-                self.rules[rule.id] = rule
-        except (json.JSONDecodeError, KeyError):
-            self.rules = {}
+    # ── delegate properties ──────────────────────────────────────────────
 
-    def _save(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"rules": [r.to_dict() for r in self.rules.values()]}
-        self.path.write_text(json.dumps(data, indent=2))
+    @property
+    def path(self) -> Path:
+        return self._store.path
+
+    @property
+    def rules(self) -> dict[str, Rule]:
+        """Return observations wrapped as Rule objects."""
+        return {
+            oid: Rule.from_observation(obs)
+            for oid, obs in self._store.observations.items()
+        }
+
+    # ── CRUD (delegates) ─────────────────────────────────────────────────
+
+    def get_rule(self, rule_id: str) -> Rule | None:
+        obs = self._store.get_observation(rule_id)
+        return Rule.from_observation(obs) if obs else None
 
     def _make_id(self, domain: str, rule_type: str, rule_text: str) -> str:
+        """Legacy ID format: domain::rule_type::slug (no observation_type prefix)."""
+        import re
         slug = re.sub(r"[^a-z0-9]+", "-", rule_text.lower().strip())[:60].strip("-")
         return f"{domain}::{rule_type}::{slug}"
 
     def _now(self) -> str:
+        from datetime import datetime, timezone
         return datetime.now(timezone.utc).isoformat()
-
-    # ── CRUD ──────────────────────────────────────────────────────
-
-    def get_rule(self, rule_id: str) -> Rule | None:
-        return self.rules.get(rule_id)
 
     def add_rule(
         self,
@@ -107,80 +179,102 @@ class RuleStore:
         sources: list[str] | None = None,
         source_type: str = "",
     ) -> Rule:
-        rule_id = self._make_id(domain, rule_type, rule)
-        now = self._now()
-
-        # Build sources list: new `sources` param takes priority,
-        # `source_url` is a deprecated kwarg for backward compat.
+        """Add a rule via ObservationStore, preserving legacy Rule semantics."""
+        # Build sources list: new `sources` param takes priority
         source_list = list(sources) if sources else []
         if source_url and source_url not in source_list:
             source_list.append(source_url)
 
-        if rule_id in self.rules:
-            existing = self.rules[rule_id]
-            existing.confidence = min(10, existing.confidence + 1)
-            existing.times_confirmed += 1
-            existing.updated_at = now
-            for src in source_list:
-                if src not in existing.sources:
-                    existing.sources.append(src)
-            if source_type:
-                existing.source_type = source_type
-            self._save()
-            return existing
+        rule_id = self._make_id(domain, rule_type, rule)
+        now = self._now()
 
-        new_rule = Rule(
+        # Check for existing match via legacy ID
+        if rule_id in self._store.observations:
+            existing_obs = self._store.observations[rule_id]
+            existing_obs.confidence = min(10, existing_obs.confidence + 1)
+            existing_obs.times_confirmed += 1
+            existing_obs.updated_at = now
+            for src in source_list:
+                if src not in existing_obs.source_urls:
+                    existing_obs.source_urls.append(src)
+            if source_type:
+                existing_obs.context["source_type"] = source_type
+            self._store._save()
+            return Rule(
+                id=existing_obs.id,
+                domain=existing_obs.domain,
+                rule_type=existing_obs.category,
+                rule=existing_obs.content,
+                example=existing_obs.context.get("example", ""),
+                confidence=existing_obs.confidence,
+                times_confirmed=existing_obs.times_confirmed,
+                times_violated=existing_obs.times_violated,
+                sources=list(existing_obs.source_urls),
+                source_type=existing_obs.context.get("source_type", ""),
+                created_at=existing_obs.created_at,
+                updated_at=existing_obs.updated_at,
+            )
+
+        # New rule — create Observation manually with legacy ID
+        obs = Observation(
             id=rule_id,
+            observation_type="rule",
             domain=domain,
-            rule_type=rule_type,
-            rule=rule,
-            example=example,
+            category=rule_type,
+            content=rule,
+            context={
+                "example": example,
+                "source_type": source_type,
+            },
             confidence=confidence,
             times_confirmed=1,
-            sources=source_list,
-            source_type=source_type,
+            source_urls=list(source_list),
             created_at=now,
             updated_at=now,
         )
-        self.rules[new_rule.id] = new_rule
-        self._save()
-        return new_rule
+        self._store.observations[rule_id] = obs
+        self._store._save()
+
+        return Rule(
+            id=obs.id,
+            domain=obs.domain,
+            rule_type=obs.category,
+            rule=obs.content,
+            example=obs.context.get("example", ""),
+            confidence=obs.confidence,
+            times_confirmed=obs.times_confirmed,
+            times_violated=obs.times_violated,
+            sources=list(obs.source_urls),
+            source_type=obs.context.get("source_type", ""),
+            created_at=obs.created_at,
+            updated_at=obs.updated_at,
+        )
 
     def promote_rule(self, rule_id: str) -> Rule | None:
-        rule = self.rules.get(rule_id)
-        if rule:
-            rule.confidence = min(10, rule.confidence + 1)
-            rule.times_confirmed += 1
-            rule.updated_at = self._now()
-            self._save()
-        return rule
+        obs = self._store.promote_observation(rule_id)
+        return Rule.from_observation(obs) if obs else None
 
     def demote_rule(self, rule_id: str) -> Rule | None:
-        rule = self.rules.get(rule_id)
-        if rule:
-            rule.confidence = max(1, rule.confidence - 1)
-            rule.times_violated += 1
-            rule.updated_at = self._now()
-            self._save()
-        return rule
+        obs = self._store.demote_observation(rule_id)
+        return Rule.from_observation(obs) if obs else None
 
     def delete_rule(self, rule_id: str) -> bool:
-        if rule_id in self.rules:
-            del self.rules[rule_id]
-            self._save()
-            return True
-        return False
+        return self._store.delete_observation(rule_id)
 
-    # ── queries ───────────────────────────────────────────────────
+    # ── queries (delegates) ──────────────────────────────────────────────
 
     def get_active_rules(self, min_confidence: int = 1) -> list[Rule]:
-        return [r for r in self.rules.values() if r.confidence >= min_confidence]
-
-    def get_rules_by_domain(self, domain: str, min_confidence: int = 1) -> list[Rule]:
         return [
-            r
-            for r in self.rules.values()
-            if r.domain == domain and r.confidence >= min_confidence
+            Rule.from_observation(o)
+            for o in self._store.get_active_observations(min_confidence)
+        ]
+
+    def get_rules_by_domain(
+        self, domain: str, min_confidence: int = 1
+    ) -> list[Rule]:
+        return [
+            Rule.from_observation(o)
+            for o in self._store.get_by_domain(domain, min_confidence)
         ]
 
     def search_rules(
@@ -191,61 +285,74 @@ class RuleStore:
         limit: int | None = None,
         rule_type: str | None = None,
     ) -> list[Rule]:
-        query_lower = query.lower()
-        results = []
-        for rule in self.rules.values():
-            if rule.confidence < min_confidence:
-                continue
-            if domain and rule.domain != domain:
-                continue
-            if rule_type and rule.rule_type != rule_type:
-                continue
-            # Search across all text fields including sources and source_type
-            searchable = (
-                rule.rule.lower() + " "
-                + rule.rule_type.lower() + " "
-                + rule.id.lower() + " "
-                + rule.domain.lower() + " "
-                + " ".join(rule.sources).lower() + " "
-                + rule.source_type.lower()
+        obs_list = self._store.search(
+            query=query,
+            domain=domain,
+            min_confidence=min_confidence,
+            limit=limit,
+            category=rule_type,
+        )
+        # Also search sources/source_type for the old RuleStore contract
+        if not obs_list:
+            # Fallback: search across all observations matching source metadata
+            obs_list = self._store.search(
+                query="",
+                domain=domain,
+                min_confidence=min_confidence,
             )
-            if query_lower in searchable:
-                results.append(rule)
-
-        results.sort(key=lambda r: (r.confidence, r.times_confirmed), reverse=True)
-        if limit:
-            results = results[:limit]
-        return results
+            # Filter client-side for sources/source_type matches
+            query_lower = query.lower()
+            obs_list = [
+                o for o in obs_list
+                if query_lower in " ".join(o.source_urls).lower()
+                or query_lower in o.context.get("source_type", "").lower()
+            ][:limit] if limit else obs_list
+        return [Rule.from_observation(o) for o in obs_list]
 
     def get_all_domain_stats(self) -> dict[str, dict]:
+        """Return per-domain stats in the old format expected by callers."""
         stats: dict[str, dict] = {}
-        for rule in self.rules.values():
-            if rule.domain not in stats:
-                stats[rule.domain] = {"total": 0, "by_type": {}, "avg_confidence": 0.0}
-            s = stats[rule.domain]
+        for obs in self._store.observations.values():
+            if obs.domain not in stats:
+                stats[obs.domain] = {"total": 0, "by_type": {}, "avg_confidence": 0.0}
+            s = stats[obs.domain]
             s["total"] += 1
-            s["by_type"][rule.rule_type] = s["by_type"].get(rule.rule_type, 0) + 1
+            s["by_type"][obs.category] = s["by_type"].get(obs.category, 0) + 1
         for domain, s in stats.items():
-            domain_rules = [r for r in self.rules.values() if r.domain == domain]
-            s["avg_confidence"] = sum(r.confidence for r in domain_rules) / max(len(domain_rules), 1)
+            domain_obs = [
+                o for o in self._store.observations.values() if o.domain == domain
+            ]
+            s["avg_confidence"] = (
+                sum(o.confidence for o in domain_obs) / max(len(domain_obs), 1)
+            )
         return stats
 
     def get_domain_stats(self, domain: str | None = None) -> dict:
-        rules = (
-            self.get_rules_by_domain(domain)
-            if domain
-            else list(self.rules.values())
-        )
-        total = len(rules)
+        if domain:
+            obs_list = [
+                o for o in self._store.observations.values() if o.domain == domain
+            ]
+        else:
+            obs_list = list(self._store.observations.values())
+
+        total = len(obs_list)
         by_type: dict[str, int] = {}
-        for r in rules:
-            by_type[r.rule_type] = by_type.get(r.rule_type, 0) + 1
+        for o in obs_list:
+            by_type[o.category] = by_type.get(o.category, 0) + 1
 
         return {
             "total": total,
             "by_type": by_type,
-            "avg_confidence": sum(r.confidence for r in rules) / max(total, 1),
+            "avg_confidence": sum(o.confidence for o in obs_list) / max(total, 1),
         }
 
+    # ── internals (preserve for DecayManager compatibility) ──────────────
+
+    def _load(self):
+        self._store._load()
+
+    def _save(self):
+        self._store._save()
+
     def __len__(self) -> int:
-        return len(self.rules)
+        return len(self._store)

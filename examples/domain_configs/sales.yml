@@ -1,0 +1,30 @@
+name: sales
+description: Sales processes, playbooks, and customer knowledge
+keywords:
+  - sales
+  - deal
+  - prospect
+  - renewal
+  - pipeline
+  - demo
+  - pricing
+  - negotiation
+  - close
+  - objection
+categories:
+  - name: call_insights
+    keywords: [call, meeting, demo, discovery, presentation]
+    label: Call Insights
+    prompt: Insights from sales calls and demos
+  - name: objection_handling
+    keywords: [objection, concern, pushback, competitor, pricing]
+    label: Objection Handling
+    prompt: How to handle common objections
+  - name: customer_context
+    keywords: [customer, account, renewal, history, preference]
+    label: Customer Context
+    prompt: Customer-specific knowledge and history
+  - name: closing
+    keywords: [close, negotiation, contract, sign, commit]
+    label: Closing Techniques
+    prompt: Deal closing strategies and techniques
