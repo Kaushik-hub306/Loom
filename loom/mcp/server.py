@@ -458,7 +458,12 @@ class LoomMCPServer:
     def org_store(self):
         if self._org_store is None:
             from loom.engine.org_store import OrgStore
-            self._org_store = OrgStore()
+            # Use project-local path when LOOM_ORG_STORE is not set
+            # and we have a project root — keeps test fixtures isolated.
+            org_path = None
+            if not os.environ.get("LOOM_ORG_STORE"):
+                org_path = self.loom_dir / "org-store.json"
+            self._org_store = OrgStore(path=org_path)
         return self._org_store
 
     # ── Tool listing ──────────────────────────────────────────────────
@@ -803,10 +808,26 @@ class LoomMCPServer:
         results = deduped[:max_rules]
 
         if not results:
+            # Check if the store has ANY rules at all
+            total_rules = len(store)
+            if total_rules == 0:
+                return [_text_result(
+                    f"## 🔍 Welcome to Loom!\n\n"
+                    f"No conventions have been learned yet — this is a fresh project.\n\n"
+                    f"**Getting started:**\n"
+                    f"- Start coding and Loom will auto-observe patterns from your work\n"
+                    f"- Or use the `teach` tool to add your first convention directly:\n"
+                    f"  `teach(domain=\"coding\", rule=\"Use type hints everywhere\", "
+                    f"rule_type=\"type_safety\")`\n"
+                    f"- Use `learn` to extract rules from an observation or feedback\n\n"
+                    f"Once conventions are in the store, `recall_relevant` will find "
+                    f"them automatically based on your task."
+                )]
             return [_text_result(
                 f"## 🔍 No relevant conventions found for \"{task}\"\n\n"
                 f"Searched domains: {', '.join(sorted(domains_to_search))}\n\n"
-                f"Try teaching some conventions first, or check back after the team has used Loom for a while."
+                f"Try teaching some conventions first, or check back after "
+                f"the team has used Loom for a while."
             )]
 
         # Format the output Glen-style
@@ -1403,9 +1424,18 @@ class LoomMCPServer:
         allowed_roles = args.get("allowed_roles", [])
         allowed_teams = args.get("allowed_teams", [])
 
+        # Validate clearance level with a helpful error
+        valid_levels = [level.name.lower() for level in ClearanceLevel]
+        clearance_key = clearance.upper()
+        if clearance_key not in ClearanceLevel.__members__:
+            return [_text_result(
+                f"Invalid clearance level: '{clearance}'. "
+                f"Valid levels (case-insensitive): {', '.join(valid_levels)}"
+            )]
+
         self.rbac.set_clearance(
             rule_id=rule_id,
-            clearance=ClearanceLevel[clearance.upper()],
+            clearance=ClearanceLevel[clearance_key],
             allowed_roles=allowed_roles,
             allowed_teams=allowed_teams,
             allowed_agents=[],

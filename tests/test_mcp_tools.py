@@ -162,7 +162,7 @@ def test_recall_relevant_empty_store(server):
         "task": "Something completely new",
         "role": "unknown-role",
     })
-    assert "No relevant conventions" in r[0].text
+    assert "Welcome to Loom" in r[0].text
 
 
 # ── observe (Glen-style passive observation) ─────────────────────────

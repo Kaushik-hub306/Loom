@@ -108,7 +108,7 @@ pip install -e .
 {
   "mcpServers": {
     "loom": {
-      "command": "python",
+      "command": "python3",
       "args": ["-m", "loom.mcp"],
       "env": {
         "LOOM_PROJECT_ROOT": "/path/to/your/project",
@@ -125,7 +125,7 @@ pip install -e .
 {
   "mcpServers": {
     "loom": {
-      "command": "python",
+      "command": "python3",
       "args": ["-m", "loom.mcp"]
     }
   }
