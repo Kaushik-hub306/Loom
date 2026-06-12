@@ -1,7 +1,7 @@
 [project]
 name = "loom-agent"
-version = "0.2.0"
-description = "The memory layer for AI agents — learns conventions from observation, teaching, and reflection"
+version = "0.3.0"
+description = "The memory layer for AI agents — shared learning across your entire organization. Observe, teach, reflect, auto-capture, auto-recall, onboard, succession, coaching amplification, per-observation RBAC, auditable timeline, and more."
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",
