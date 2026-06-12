@@ -1,4 +1,4 @@
-"""Loom MCP server — exposes recall_memory, store_outcome, get_stats tools.
+"""Loom MCP server — memory layer for AI agents: learn, teach, reflect, recall, export, stats, observe.
 
 Uses ObservationStore, CategoryRegistry, and SourceTracker when available,
 with full backward compatibility for existing tool signatures and data formats.
@@ -11,6 +11,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 # ── Core engine imports (always available) ─────────────────────────
 from loom.engine.rule_store import Rule, RuleStore
@@ -97,8 +99,8 @@ STORE_OUTCOME_SCHEMA = {
     "properties": {
         "domain": {"type": "string", "description": "Domain name"},
         "outcome": {"type": "string", "description": "accepted or rejected"},
-        "feedback": {"type": "string", "description": "PR review feedback"},
-        "source_url": {"type": "string", "description": "URL of the PR or review"},
+        "feedback": {"type": "string", "description": "Feedback, review comment, or observation text"},
+        "source_url": {"type": "string", "description": "Optional source URL (PR, issue, doc)"},
         "observation_type": {
             "type": "string",
             "description": "Optional: observation type for stored entries (default 'rule')",
@@ -129,6 +131,55 @@ GET_STATS_SCHEMA = {
     "required": [],
 }
 
+LEARN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "context": {"type": "string", "description": "What was happening (e.g., 'building a REST API', 'refactoring auth')"},
+        "observation": {"type": "string", "description": "What was observed — feedback, pattern noticed, code snippet, outcome"},
+        "lesson": {"type": "string", "description": "Explicit lesson to learn (if empty, extraction runs on observation)"},
+        "domain": {"type": "string", "description": "Domain to store in (default: 'general')", "default": "general"},
+        "confidence": {"type": "integer", "description": "Confidence 1-10 (default: 5)", "default": 5},
+        "source_type": {"type": "string", "description": "Type of source — observation, pr_review, reflection, pattern", "default": "observation"},
+    },
+    "required": ["context", "observation"],
+}
+
+TEACH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "domain": {"type": "string", "description": "Domain name"},
+        "rule": {"type": "string", "description": "The rule text — what to do or not do"},
+        "rule_type": {"type": "string", "description": "Free-form rule type (e.g., 'naming', 'git_workflow', 'preference')"},
+        "example": {"type": "string", "description": "Optional example illustrating the rule"},
+        "confidence": {"type": "integer", "description": "Confidence 1-10 (default: 7)", "default": 7},
+    },
+    "required": ["domain", "rule", "rule_type"],
+}
+
+REFLECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "domain": {"type": "string", "description": "Domain to store in"},
+        "context": {"type": "string", "description": "What you were doing or building"},
+        "patterns": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of observed patterns (one per entry)",
+        },
+    },
+    "required": ["domain", "patterns"],
+}
+
+EXPORT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "domain": {"type": "string", "description": "Optional domain filter"},
+        "format": {"type": "string", "description": "Output format: 'markdown', 'json', or 'compact'", "default": "markdown"},
+        "min_confidence": {"type": "integer", "description": "Minimum confidence filter (default: 1)", "default": 1},
+        "rule_type": {"type": "string", "description": "Filter by rule type"},
+    },
+    "required": [],
+}
 
 SET_PRIVATE_MODE_SCHEMA = {
     "type": "object",
@@ -208,7 +259,7 @@ class LoomMCPServer:
         if self._bootstrapped:
             return
 
-        if not self.loom_dir.exists():
+        if not self.loom_dir.exists() or not (self.loom_dir / "domains").exists():
             self.loom_dir.mkdir(parents=True, exist_ok=True)
             (self.loom_dir / "domains").mkdir(exist_ok=True)
             _write_default_domain_configs(self.loom_dir / "domains")
@@ -225,6 +276,10 @@ class LoomMCPServer:
                 "# Loom Conventions\n\nNot learned yet.\n"
             )
 
+            # Create .gitignore for sensitive loom files
+            (self.loom_dir / ".gitignore").write_text(
+                "tokens.json\nintegrity.json\naudit.jsonl\nprivate.jsonl\n"
+            )
         self._bootstrapped = True
 
     # ── store property ─────────────────────────────────────────────
@@ -277,14 +332,29 @@ class LoomMCPServer:
         self._bootstrap()
         return [
             ToolDef(
+                name="learn",
+                description="Learn from observation — report what happened and what was learned",
+                inputSchema=LEARN_SCHEMA,
+            ),
+            ToolDef(
+                name="teach",
+                description="Teach a rule directly — inject a convention without extraction",
+                inputSchema=TEACH_SCHEMA,
+            ),
+            ToolDef(
+                name="reflect",
+                description="Reflect on completed work — extract patterns from multiple observations",
+                inputSchema=REFLECT_SCHEMA,
+            ),
+            ToolDef(
                 name="recall_memory",
                 description="Search learned conventions and rules",
                 inputSchema=RECALL_MEMORY_SCHEMA,
             ),
             ToolDef(
-                name="store_outcome",
-                description="Store a PR outcome and learn from feedback",
-                inputSchema=STORE_OUTCOME_SCHEMA,
+                name="export",
+                description="Export learned rules in structured formats (markdown, json, compact)",
+                inputSchema=EXPORT_SCHEMA,
             ),
             ToolDef(
                 name="get_stats",
@@ -295,6 +365,11 @@ class LoomMCPServer:
                 name="record_observation",
                 description="Record an observation into the knowledge base with domain classification and provenance tracking",
                 inputSchema=RECORD_OBSERVATION_SCHEMA,
+            ),
+            ToolDef(
+                name="store_outcome",
+                description="Store an outcome and learn from feedback (delegates to learn)",
+                inputSchema=STORE_OUTCOME_SCHEMA,
             ),
             ToolDef(
                 name="set_private_mode",
@@ -317,14 +392,22 @@ class LoomMCPServer:
         self._bootstrap()
         store = self.store  # ObservationStore
 
-        if name == "recall_memory":
+        if name == "learn":
+            return self._handle_learn(store, arguments)
+        elif name == "teach":
+            return self._handle_teach(store, arguments)
+        elif name == "reflect":
+            return self._handle_reflect(store, arguments)
+        elif name == "recall_memory":
             return self._handle_recall(store, arguments)
-        elif name == "store_outcome":
-            return self._handle_store(store, arguments)
+        elif name == "export":
+            return self._handle_export(store, arguments)
         elif name == "get_stats":
             return self._handle_stats(store, arguments)
         elif name == "record_observation":
             return self._handle_record_observation(store, arguments)
+        elif name == "store_outcome":
+            return self._handle_store(store, arguments)
         elif name == "set_private_mode":
             return self._handle_set_private_mode(arguments)
         elif name == "verify_integrity":
@@ -442,6 +525,7 @@ class LoomMCPServer:
                 lines.append(f"  Tags: {', '.join(obs.tags)}")
 
         return [_text_result("\n".join(lines))]
+
 
     # ── handle_store ───────────────────────────────────────────────
 
@@ -577,8 +661,6 @@ class LoomMCPServer:
                     except Exception:
                         pass
 
-            self._regenerate_conventions(store, domain)
-
             return [
                 _text_result(
                     f"## Stored Outcome\n\n"
@@ -587,6 +669,159 @@ class LoomMCPServer:
                     f"Observations promoted: {promoted}\n"
                 )
             ]
+
+    def _handle_learn(self, store: ObservationStore, args: dict) -> list:
+        """Learn from an observation — the primary general-purpose learning entry point."""
+        context = args.get("context", "")
+        observation = args.get("observation", "")
+        lesson = args.get("lesson", "")
+        domain = args.get("domain", "general")
+        confidence = args.get("confidence", 5)
+        source_type = args.get("source_type", "observation")
+
+        extractor = DomainExtractor(self.loom_dir / "domains")
+        available = list(extractor.domains.keys()) if extractor.domains else []
+        if available and domain not in available:
+            return [_text_result(
+                f"No domain config found for '{domain}'. "
+                f"Available domains: {', '.join(available)}"
+            )]
+
+        created = 0
+        _obs = self._obs_store
+
+        if lesson:
+            _obs.add_observation(
+                domain=domain,
+                category="explicit_lesson",
+                content=lesson.strip(),
+                observation_type="rule",
+                confidence=min(10, confidence + 2),
+                source_url=context,
+                tags=[source_type],
+            )
+            created = 1
+        elif observation:
+            extracted = extractor.extract_rules(observation, domain)
+            for rule_data in extracted:
+                _obs.add_observation(
+                    domain=domain,
+                    category=rule_data["rule_type"],
+                    content=rule_data["rule"],
+                    observation_type="rule",
+                    confidence=rule_data.get("confidence", confidence),
+                    source_url=context,
+                    tags=[source_type],
+                )
+                created += 1
+
+        self._regenerate_conventions(store, domain)
+        return [_text_result(
+            f"## Learned\n\n"
+            f"Domain: {domain}\n"
+            f"Context: {context}\n"
+            f"Rules created: {created}\n"
+        )]
+
+    def _handle_teach(self, store: ObservationStore, args: dict) -> list:
+        """Teach a rule directly — inject a convention without any extraction."""
+        domain = args["domain"]
+        rule_text = args["rule"]
+        rule_type = args["rule_type"]
+        example = args.get("example", "")
+        confidence = args.get("confidence", 7)
+
+        _obs = self._obs_store
+        _obs.add_observation(
+            domain=domain,
+            category=rule_type,
+            content=rule_text.strip(),
+            observation_type="rule",
+            confidence=confidence,
+            source_url="explicit_teach",
+        )
+
+        self._regenerate_conventions(store, domain)
+        return [_text_result(
+            f"## Taught\n\n"
+            f"Domain: {domain}\n"
+            f"Rule type: {rule_type}\n"
+            f"Rule: {rule_text.strip()}\n"
+            f"Confidence: {confidence}/10\n"
+        )]
+
+    def _handle_reflect(self, store: ObservationStore, args: dict) -> list:
+        """Reflect on completed work — extract rules from multiple observations."""
+        domain = args["domain"]
+        context = args.get("context", "")
+        patterns = args.get("patterns", [])
+
+        extractor = DomainExtractor(self.loom_dir / "domains")
+        created = 0
+        _obs = self._obs_store
+
+        for pattern in patterns:
+            extracted = extractor.extract_rules(pattern, domain)
+            for rule_data in extracted:
+                _obs.add_observation(
+                    domain=domain,
+                    category=rule_data["rule_type"],
+                    content=rule_data["rule"],
+                    observation_type="rule",
+                    confidence=rule_data.get("confidence", 7),
+                    source_url=context,
+                    tags=["reflection"],
+                )
+                created += 1
+
+        self._regenerate_conventions(store, domain)
+        return [_text_result(
+            f"## Reflected\n\n"
+            f"Domain: {domain}\n"
+            f"Patterns considered: {len(patterns)}\n"
+            f"Rules created: {created}\n"
+        )]
+
+    def _handle_export(self, store: ObservationStore, args: dict) -> list:
+        """Export learned rules in a structured format."""
+        domain = args.get("domain")
+        fmt = args.get("format", "markdown")
+        min_conf = args.get("min_confidence", 1)
+        rule_type = args.get("rule_type")
+
+        rules = store.search(
+            query="",
+            domain=domain,
+            min_confidence=min_conf,
+            category=rule_type,
+        )
+
+        if not rules:
+            return [_text_result("No rules to export.")]
+
+        if fmt == "json":
+            data = [r.to_dict() for r in rules]
+            return [_text_result(json.dumps(data, indent=2))]
+
+        elif fmt == "compact":
+            lines = [
+                f"{r.domain} | {r.category} | c{r.confidence} | {r.content}"
+                for r in rules
+            ]
+            return [_text_result("\n".join(lines))]
+
+        else:  # markdown
+            current_domain = None
+            lines = ["# Exported Rules\n"]
+            for r in sorted(rules, key=lambda x: (x.domain, -x.confidence)):
+                if r.domain != current_domain:
+                    current_domain = r.domain
+                    lines.append(f"\n## {current_domain}\n")
+                lines.append(
+                    f"- **{r.category}** ({r.confidence}/10): {r.content}\n"
+                    f"  - Source: {r.source_agent or 'unknown'} | Confirmed: {r.times_confirmed}x"
+                )
+            return [_text_result("\n".join(lines))]
 
     # ── handle_record_observation ───────────────────────────────────
 
@@ -702,9 +937,12 @@ class LoomMCPServer:
         """
 
         try:
-            from loom.engine.llm_extractor import LLMExtractor
+            from loom.semantic.llm_extractor import LLMExtractor
         except ImportError:
-            return []  # caller falls back to single observation
+            try:
+                from loom.engine.llm_extractor import LLMExtractor
+            except ImportError:
+                return []  # caller falls back to single observation
 
         extractor = LLMExtractor()
         extracted = extractor.extract(text)
@@ -967,7 +1205,7 @@ class LoomMCPServer:
             observation_type="rule",
         )
 
-        lines = ["# Loom Conventions\n", "Auto-learned from PR feedback.\n"]
+        lines = ["# Loom Conventions\n", "Auto-learned from observations, teaching, and reflection.\n"]
         if not rules:
             lines.append("Nothing learned yet.")
         else:
@@ -1157,49 +1395,378 @@ categories:
     coding_yml = domains_dir / "coding.yml"
     support_yml = domains_dir / "support.yml"
 
-    if not coding_yml.exists():
-        coding_yml.write_text("""\
-name: coding
-description: Software engineering conventions
-keywords:
-  - code
-  - PR
-  - review
-  - type hint
-  - test
-  - refactor
-  - architecture
-  - merge
-rule_types:
-  - type_safety
-  - testing
-  - error_handling
-  - naming
-  - architecture
-  - documentation
-  - formatting
-  - security
-""")
+    _DOMAINS = {
+        "coding": {
+            "name": "coding",
+            "description": "Software engineering conventions — type safety, error handling, function design",
+            "keywords": [
+                "code", "function", "class", "module", "import", "type",
+                "variable", "algorithm", "refactor", "method",
+            ],
+            "rule_types": [
+                "type_safety", "error_handling", "naming", "imports",
+                "function_design", "control_flow", "data_structures", "performance",
+            ],
+            "patterns": {
+                "type_safety": [
+                    "type hint", "type annotation", "typing", "mypy",
+                    "return type", "type safety", "type-check", "generic",
+                ],
+                "error_handling": [
+                    "error handling", "try-except", "try/except", "exception",
+                    "error", "result type", "unwrap", "abort", "fallback",
+                ],
+                "naming": [
+                    "camelcase", "snake_case", "pascalcase", "naming convention",
+                    "rename", "variable name", "function name",
+                ],
+                "imports": [
+                    "import", "from import", "circular import", "dependency",
+                    "module", "package",
+                ],
+                "function_design": [
+                    "pure function", "side effect", "parameter", "return",
+                    "function too long", "split function", "single responsibility",
+                ],
+                "control_flow": [
+                    "if-else", "loop", "recursion", "early return",
+                    "guard clause", "switch", "match case",
+                ],
+                "data_structures": [
+                    "list", "dict", "set", "tuple", "dataclass", "class",
+                    "inheritance", "composition", "interface",
+                ],
+                "performance": [
+                    "performance", "slow", "optimize", "cache", "lazy",
+                    "eager", "memory", "allocation", "bottleneck",
+                ],
+            },
+        },
+        "style": {
+            "name": "style",
+            "description": "Coding style, formatting, and aesthetic conventions",
+            "keywords": [
+                "style", "format", "indent", "spacing", "line length",
+                "whitespace", "quote", "trailing", "brace", "look",
+                "readability", "clean",
+            ],
+            "rule_types": [
+                "formatting", "naming_convention", "comments", "whitespace",
+                "line_length", "quotes", "trailing_commas", "brace_style",
+            ],
+            "patterns": {
+                "formatting": [
+                    "tab", "space", "indent", "formatting", "prettier",
+                    "black", "formatter", "auto-format",
+                ],
+                "naming_convention": [
+                    "camelcase", "snake_case", "pascalcase", "naming",
+                    "rename", "variable name", "function name", "file name",
+                ],
+                "comments": [
+                    "comment", "docstring", "inline comment", "TODO",
+                    "FIXME", "explain", "document",
+                ],
+                "whitespace": [
+                    "blank line", "whitespace", "trailing space",
+                    "newline", "EOF", "end of file",
+                ],
+                "line_length": [
+                    "line too long", "line length", "wrap", "break line",
+                    "80", "100", "120",
+                ],
+                "quotes": [
+                    "single quote", "double quote", "quote", "string",
+                    "f-string", "template string",
+                ],
+                "trailing_commas": [
+                    "trailing comma", "comma", "last item",
+                ],
+                "brace_style": [
+                    "brace", "bracket", "indent style", "curly brace",
+                    "same line", "new line",
+                ],
+            },
+        },
+        "architecture": {
+            "name": "architecture",
+            "description": "Design patterns, module structure, and system organization",
+            "keywords": [
+                "architecture", "design pattern", "module", "service",
+                "layer", "separation", "dependency", "interface",
+                "abstraction", "component",
+            ],
+            "rule_types": [
+                "separation_of_concerns", "module_design", "service_layer",
+                "dependency", "design_pattern", "abstraction",
+                "interface", "composition",
+            ],
+            "patterns": {
+                "separation_of_concerns": [
+                    "separation of concerns", "single responsibility",
+                    "concern", "layer", "tier",
+                ],
+                "module_design": [
+                    "module", "package", "namespace", "file structure",
+                    "folder", "directory",
+                ],
+                "service_layer": [
+                    "service", "service layer", "API", "controller",
+                    "handler", "route",
+                ],
+                "dependency": [
+                    "dependency", "coupling", "decouple", "inversion",
+                    "inject", "DI", "import",
+                ],
+                "design_pattern": [
+                    "design pattern", "factory", "singleton", "observer",
+                    "strategy", "builder", "adapter", "facade",
+                    "repository",
+                ],
+                "abstraction": [
+                    "abstraction", "abstract", "interface", "protocol",
+                    "base class", "mixin",
+                ],
+                "interface": [
+                    "interface", "API", "contract", "public", "private",
+                    "internal", "export",
+                ],
+                "composition": [
+                    "composition", "inheritance", "mixin", "trait",
+                    "delegate", "wrapper",
+                ],
+            },
+        },
+        "process": {
+            "name": "process",
+            "description": "Workflow patterns, git practices, review norms, and CI/CD",
+            "keywords": [
+                "git", "commit", "branch", "merge", "PR", "pull request",
+                "review", "CI", "CD", "deploy", "release", "workflow",
+            ],
+            "rule_types": [
+                "git_workflow", "branching", "commit_message", "pr_process",
+                "review_norms", "release", "deploy", "ci_cd",
+            ],
+            "patterns": {
+                "git_workflow": [
+                    "git", "workflow", "rebase", "squash", "merge commit",
+                    "fast-forward",
+                ],
+                "branching": [
+                    "branch", "branch name", "feature branch", "main",
+                    "master", "develop", "hotfix",
+                ],
+                "commit_message": [
+                    "commit message", "commit", "conventional commit",
+                    "semantic commit", "changelog",
+                ],
+                "pr_process": [
+                    "PR", "pull request", "draft", "ready for review",
+                    "approve", "request changes",
+                ],
+                "review_norms": [
+                    "review", "code review", "reviewer", "LGTM",
+                    "approve", "feedback",
+                ],
+                "release": [
+                    "release", "version", "semver", "tag", "changelog",
+                    "release note",
+                ],
+                "deploy": [
+                    "deploy", "deployment", "rollback", "staging",
+                    "production", "canary", "blue-green",
+                ],
+                "ci_cd": [
+                    "CI", "CD", "pipeline", "build", "test", "lint",
+                    "check", "GitHub Actions", "Jenkins",
+                ],
+            },
+        },
+        "testing": {
+            "name": "testing",
+            "description": "Testing conventions, frameworks, and quality practices",
+            "keywords": [
+                "test", "testing", "pytest", "coverage", "mock",
+                "fixture", "assert", "TDD",
+            ],
+            "rule_types": [
+                "unit_test", "integration_test", "e2e_test", "coverage",
+                "test_location", "mocking", "fixtures", "assertions",
+            ],
+            "patterns": {
+                "unit_test": [
+                    "unit test", "test", "testing", "pytest", "unittest",
+                    "test case",
+                ],
+                "integration_test": [
+                    "integration test", "integration", "e2e", "end-to-end",
+                    "system test",
+                ],
+                "e2e_test": [
+                    "e2e", "end-to-end", "browser test", "playwright",
+                    "selenium", "cypress",
+                ],
+                "coverage": [
+                    "coverage", "code coverage", "line coverage",
+                    "branch coverage",
+                ],
+                "test_location": [
+                    "test directory", "test file", "tests/",
+                    "conftest", "test fixture",
+                ],
+                "mocking": [
+                    "mock", "stub", "fake", "spy", "patch", "monkeypatch",
+                ],
+                "fixtures": [
+                    "fixture", "setup", "teardown", "before each",
+                    "after each", "conftest",
+                ],
+                "assertions": [
+                    "assert", "expect", "should", "must", "verify",
+                    "check",
+                ],
+            },
+        },
+        "security": {
+            "name": "security",
+            "description": "Security patterns, vulnerability prevention, and secure coding",
+            "keywords": [
+                "security", "vulnerability", "injection", "XSS", "CSRF",
+                "auth", "authentication", "authorization", "secret",
+                "encrypt", "hash",
+            ],
+            "rule_types": [
+                "auth", "authorization", "input_validation",
+                "sanitization", "secrets", "cryptography",
+                "dependency_security", "threat_model",
+            ],
+            "patterns": {
+                "auth": [
+                    "auth", "authentication", "login", "logout",
+                    "session", "token", "JWT", "OAuth",
+                ],
+                "authorization": [
+                    "authorization", "permission", "access control",
+                    "RBAC", "role", "scope", "capability",
+                ],
+                "input_validation": [
+                    "input validation", "validate", "sanitize",
+                    "escape", "filter input", "user input",
+                ],
+                "sanitization": [
+                    "sanitize", "sanitization", "escape", "encode",
+                    "XSS", "cross-site scripting",
+                ],
+                "secrets": [
+                    "secret", "password", "API key", "token",
+                    "credential", "env", "environment variable",
+                ],
+                "cryptography": [
+                    "encrypt", "decrypt", "hash", "bcrypt", "sha",
+                    "tls", "ssl", "https",
+                ],
+                "dependency_security": [
+                    "dependency", "vulnerability", "CVE", "supply chain",
+                    "audit", "update", "patch",
+                ],
+                "threat_model": [
+                    "threat", "attack", "exploit", "risk", "mitigation",
+                    "trust boundary",
+                ],
+            },
+        },
+        "documentation": {
+            "name": "documentation",
+            "description": "Documentation patterns, READMEs, API docs, and knowledge sharing",
+            "keywords": [
+                "document", "docs", "readme", "comment", "docstring",
+                "explain", "tutorial", "guide",
+            ],
+            "rule_types": [
+                "docstrings", "readme", "api_docs", "inline_comments",
+                "changelog", "architecture_docs", "examples", "tutorials",
+            ],
+            "patterns": {
+                "docstrings": [
+                    "docstring", "doc string", "documentation string",
+                    "pydoc", "jsdoc",
+                ],
+                "readme": [
+                    "readme", "README", "getting started", "setup",
+                ],
+                "api_docs": [
+                    "API doc", "endpoint documentation", "swagger",
+                    "openapi", "route documentation",
+                ],
+                "inline_comments": [
+                    "inline comment", "comment", "explain", "why",
+                ],
+                "changelog": [
+                    "changelog", "change log", "version history",
+                ],
+                "architecture_docs": [
+                    "architecture document", "ADR", "design doc",
+                    "RFC", "decision record",
+                ],
+                "examples": [
+                    "example", "code sample", "usage example",
+                    "demo",
+                ],
+                "tutorials": [
+                    "tutorial", "guide", "walkthrough", "how-to",
+                ],
+            },
+        },
+        "general": {
+            "name": "general",
+            "description": "Catch-all domain for preferences, conventions, best practices, and habits",
+            "keywords": [
+                "always", "never", "should", "must", "prefer",
+                "convention", "best practice", "guideline", "rule",
+                "standard", "habit", "pattern",
+            ],
+            "rule_types": [
+                "preference", "convention", "best_practice",
+                "rule_of_thumb", "guideline", "standard", "habit",
+                "pattern",
+            ],
+            "patterns": {
+                "preference": [
+                    "prefer", "preference", "I like", "we like",
+                ],
+                "convention": [
+                    "convention", "conventional", "by convention",
+                ],
+                "best_practice": [
+                    "best practice", "recommended", "industry standard",
+                ],
+                "rule_of_thumb": [
+                    "rule of thumb", "generally", "in general",
+                    "usually", "typically",
+                ],
+                "guideline": [
+                    "guideline", "guide", "should", "ought to",
+                ],
+                "standard": [
+                    "standard", "standardize", "consistent",
+                    "uniform",
+                ],
+                "habit": [
+                    "always", "never", "every time", "habit",
+                ],
+                "pattern": [
+                    "pattern", "template", "boilerplate", "scaffold",
+                ],
+            },
+        },
+    }
 
-    if not support_yml.exists():
-        support_yml.write_text("""\
-name: support
-description: Support and escalation conventions
-keywords:
-  - support
-  - customer
-  - escalation
-  - ticket
-  - response
-  - SLA
-  - triage
-rule_types:
-  - escalation
-  - response_time
-  - triage
-  - communication
-  - documentation
-""")
+    for name, config in _DOMAINS.items():
+        yml_file = domains_dir / f"{name}.yml"
+        if yml_file.exists():
+            continue
+        yml_file.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1219,6 +1786,69 @@ def main():
     loom = create_loom_server(project_root)
 
     mcp = FastMCP("loom")
+
+    @mcp.tool(
+        name="learn",
+        description="Learn from observation — report what happened and what was learned",
+    )
+    async def learn(
+        context: str,
+        observation: str,
+        lesson: str = "",
+        domain: str = "general",
+        confidence: int = 5,
+        source_type: str = "observation",
+    ) -> str:
+        result = loom._handle_learn(
+            loom.store,
+            {
+                "context": context,
+                "observation": observation,
+                "lesson": lesson,
+                "domain": domain,
+                "confidence": confidence,
+                "source_type": source_type,
+            },
+        )
+        return result[0].text
+
+    @mcp.tool(
+        name="teach",
+        description="Teach a rule directly — inject a convention without extraction",
+    )
+    async def teach(
+        domain: str,
+        rule: str,
+        rule_type: str,
+        example: str = "",
+        confidence: int = 7,
+    ) -> str:
+        result = loom._handle_teach(
+            loom.store,
+            {
+                "domain": domain,
+                "rule": rule,
+                "rule_type": rule_type,
+                "example": example,
+                "confidence": confidence,
+            },
+        )
+        return result[0].text
+
+    @mcp.tool(
+        name="reflect",
+        description="Reflect on completed work — extract patterns from multiple observations",
+    )
+    async def reflect(
+        domain: str,
+        patterns: list[str],
+        context: str = "",
+    ) -> str:
+        result = loom._handle_reflect(
+            loom.store,
+            {"domain": domain, "patterns": patterns, "context": context},
+        )
+        return result[0].text
 
     @mcp.tool(
         name="recall_memory",
@@ -1248,8 +1878,29 @@ def main():
         return result[0].text
 
     @mcp.tool(
+        name="export",
+        description="Export learned rules in structured formats (markdown, json, compact)",
+    )
+    async def export_rules(
+        domain: str = "",
+        format: str = "markdown",
+        min_confidence: int = 1,
+        rule_type: str = "",
+    ) -> str:
+        result = loom._handle_export(
+            loom.store,
+            {
+                "domain": domain or None,
+                "format": format,
+                "min_confidence": min_confidence,
+                "rule_type": rule_type or None,
+            },
+        )
+        return result[0].text
+
+    @mcp.tool(
         name="store_outcome",
-        description="Store a PR outcome and learn from feedback",
+        description="Store an outcome and learn from feedback (delegates to learn)",
     )
     async def store_outcome(
         domain: str,
@@ -1337,5 +1988,7 @@ def main():
     async def get_audit_log(limit: int = 50) -> str:
         result = loom._handle_get_audit_log({"limit": limit})
         return result[0].text
+
+    mcp.run(transport="stdio")
 
     mcp.run(transport="stdio")

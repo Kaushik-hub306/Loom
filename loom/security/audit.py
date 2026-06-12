@@ -18,6 +18,10 @@ class AuditAction(str, Enum):
     OBSERVATION_DELETED = "observation_deleted"
     INTEGRITY_CHECK_PASSED = "integrity_check_passed"
     INTEGRITY_CHECK_FAILED = "integrity_check_failed"
+    RULE_LEARNED = "rule_learned"
+    RULE_TAUGHT = "rule_taught"
+    RULE_REFLECTED = "rule_reflected"
+    RULES_EXPORTED = "rules_exported"
 
 
 def _audit_log_path() -> Path:

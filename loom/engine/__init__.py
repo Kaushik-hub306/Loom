@@ -1,5 +1,5 @@
 """Loom engine — ObservationStore, CategoryRegistry, SourceTracker,
-KnowledgeGraph, GraphStore.
+KnowledgeGraph, GraphStore, DecayManager, LLMExtractor.
 
 Loom v2 adds the generalized ``Observation`` model alongside the new
 ``ObservationStore``, ``CategoryRegistry``, ``SourceTracker``,
@@ -19,6 +19,7 @@ from .graph_store import GraphStore
 from .rule_store import RuleStore, Rule
 from .domain_extractor import DomainExtractor
 from .decay_manager import DecayManager
+from .llm_extractor import LLMExtractor, ExtractedRule
 
 __all__ = [
     # v2
@@ -34,4 +35,6 @@ __all__ = [
     # existing
     "DomainExtractor",
     "DecayManager",
+    "LLMExtractor",
+    "ExtractedRule",
 ]
