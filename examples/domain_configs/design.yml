@@ -1,0 +1,26 @@
+name: design
+description: Design system conventions and patterns
+keywords:
+  - design
+  - css
+  - component
+  - layout
+  - color
+  - typography
+  - spacing
+  - figma
+  - ui
+  - ux
+categories:
+  - name: accessibility
+    keywords: [a11y, aria, contrast, screen reader, accessible]
+    label: Accessibility
+    prompt: Accessibility patterns and requirements
+  - name: responsiveness
+    keywords: [responsive, mobile, breakpoint, media query, viewport]
+    label: Responsive Design
+    prompt: Responsive design conventions
+  - name: consistency
+    keywords: [consistent, design system, pattern, convention, standard]
+    label: Consistency
+    prompt: Design consistency rules
