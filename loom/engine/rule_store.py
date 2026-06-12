@@ -20,7 +20,8 @@ class Rule:
     confidence: int = 5
     times_confirmed: int = 0
     times_violated: int = 0
-    source_urls: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
+    source_type: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -34,13 +35,16 @@ class Rule:
             "confidence": self.confidence,
             "times_confirmed": self.times_confirmed,
             "times_violated": self.times_violated,
-            "source_urls": self.source_urls,
+            "sources": self.sources,
+            "source_type": self.source_type,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Rule":
+        # Backward compat: migrate old "source_urls" key to "sources"
+        sources = d.get("sources", d.get("source_urls", []))
         return cls(
             id=d["id"],
             domain=d["domain"],
@@ -50,7 +54,8 @@ class Rule:
             confidence=d.get("confidence", 5),
             times_confirmed=d.get("times_confirmed", 0),
             times_violated=d.get("times_violated", 0),
-            source_urls=d.get("source_urls", []),
+            sources=sources,
+            source_type=d.get("source_type", ""),
             created_at=d.get("created_at", ""),
             updated_at=d.get("updated_at", ""),
         )
@@ -99,17 +104,28 @@ class RuleStore:
         example: str = "",
         confidence: int = 5,
         source_url: str = "",
+        sources: list[str] | None = None,
+        source_type: str = "",
     ) -> Rule:
         rule_id = self._make_id(domain, rule_type, rule)
         now = self._now()
+
+        # Build sources list: new `sources` param takes priority,
+        # `source_url` is a deprecated kwarg for backward compat.
+        source_list = list(sources) if sources else []
+        if source_url and source_url not in source_list:
+            source_list.append(source_url)
 
         if rule_id in self.rules:
             existing = self.rules[rule_id]
             existing.confidence = min(10, existing.confidence + 1)
             existing.times_confirmed += 1
             existing.updated_at = now
-            if source_url:
-                existing.source_urls.append(source_url)
+            for src in source_list:
+                if src not in existing.sources:
+                    existing.sources.append(src)
+            if source_type:
+                existing.source_type = source_type
             self._save()
             return existing
 
@@ -121,7 +137,8 @@ class RuleStore:
             example=example,
             confidence=confidence,
             times_confirmed=1,
-            source_urls=[source_url] if source_url else [],
+            sources=source_list,
+            source_type=source_type,
             created_at=now,
             updated_at=now,
         )
@@ -172,6 +189,7 @@ class RuleStore:
         domain: str | None = None,
         min_confidence: int = 1,
         limit: int | None = None,
+        rule_type: str | None = None,
     ) -> list[Rule]:
         query_lower = query.lower()
         results = []
@@ -180,12 +198,18 @@ class RuleStore:
                 continue
             if domain and rule.domain != domain:
                 continue
-            if (
-                query_lower in rule.rule.lower()
-                or query_lower in rule.rule_type.lower()
-                or query_lower in rule.id.lower()
-                or query_lower in rule.domain.lower()
-            ):
+            if rule_type and rule.rule_type != rule_type:
+                continue
+            # Search across all text fields including sources and source_type
+            searchable = (
+                rule.rule.lower() + " "
+                + rule.rule_type.lower() + " "
+                + rule.id.lower() + " "
+                + rule.domain.lower() + " "
+                + " ".join(rule.sources).lower() + " "
+                + rule.source_type.lower()
+            )
+            if query_lower in searchable:
                 results.append(rule)
 
         results.sort(key=lambda r: (r.confidence, r.times_confirmed), reverse=True)

@@ -12,6 +12,10 @@ class AuditAction(str, Enum):
     RULE_PROMOTED = "rule_promoted"
     RULE_DEMOTED = "rule_demoted"
     RULE_ARCHIVED = "rule_archived"
+    RULE_LEARNED = "rule_learned"
+    RULE_TAUGHT = "rule_taught"
+    RULE_REFLECTED = "rule_reflected"
+    RULES_EXPORTED = "rules_exported"
 
 
 def _audit_log_path() -> Path:
