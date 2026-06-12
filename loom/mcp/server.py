@@ -34,6 +34,9 @@ Tools (18 total):
 
 import json
 import os
+import uuid
+import atexit
+import signal
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -347,6 +350,19 @@ class LoomMCPServer:
         self._rbac = None
         self._org_store = None
 
+        # ── Session state (hook layer) ──────────────────────────────
+        self._session_id: str | None = None
+        self._session_initialized: bool = False
+        self._session_task: str = ""
+        self._session_role: str = ""
+        self._session_call_count: int = 0
+        # Tools excluded from auto-observation (reads, not writes)
+        self._observe_excluded = frozenset({
+            "recall_memory", "recall_relevant", "export", "export_timeline",
+            "get_stats", "timeline", "onboard", "session_init", "observe",
+        })
+
+
     def _bootstrap(self):
         if self._bootstrapped:
             return
@@ -509,6 +525,16 @@ class LoomMCPServer:
     async def call_tool(self, name: str, arguments: dict) -> list:
         self._bootstrap()
 
+        # ── Pre-hook: auto session_init on first call ───────────────
+        session_header = self._ensure_session_init(arguments)
+
+        # ── Pre-hook: capture task/role from session_init ───────────
+        if name == "session_init":
+            self._session_task = arguments.get("task", "")
+            self._session_role = arguments.get("role", "")
+        if name == "recall_relevant":
+            self._session_task = arguments.get("task", self._session_task)
+
         handlers = {
             "learn": self._handle_learn,
             "teach": self._handle_teach,
@@ -535,9 +561,95 @@ class LoomMCPServer:
             return [_text_result(f"Unknown tool: {name}")]
 
         try:
-            return handler(arguments)
+            result = handler(arguments)
         except Exception as e:
-            return [_text_result(f"Error in tool '{name}': {e}")]
+            result = [_text_result(f"Error in tool '{name}': {e}")]
+
+        # ── Post-hook: auto-observe this tool call ──────────────────
+        self._auto_observe(name, arguments, result)
+
+        # ── Prepend session context on first call ───────────────────
+        if session_header:
+            result.insert(0, _text_result(session_header))
+
+        self._session_call_count += 1
+        return result
+
+    def _ensure_session_init(self, args: dict) -> str:
+        """Auto-inject context on the first tool call of a session.
+
+        Returns a formatted context string to prepend to the response,
+        or an empty string if the session was already initialized.
+        """
+        if self._session_initialized:
+            return ""
+
+        self._session_id = str(uuid.uuid4())
+        self._session_initialized = True
+
+        # Use task/role from session_init or recall_relevant if available,
+        # otherwise use generic defaults.
+        task = self._session_task or args.get("task", "")
+        role = self._session_role or args.get("role", "")
+
+        # If this is session_init or recall_relevant itself, don't
+        # inject context on top of its own response.
+        # But DO run ContextLoader in the background so subsequent
+        # calls benefit.
+        try:
+            loader = self.context_loader
+            if task:
+                block = loader.load_context(task_description=task, role=role)
+                formatted = loader.format_context_block(block)
+                self.auto_observer.on_session_start()
+                return formatted
+        except Exception:
+            pass
+
+        self.auto_observer.on_session_start()
+        return ""
+
+    def _auto_observe(self, tool_name: str, args: dict, result: list):
+        """Record this tool call as a passive observation.
+
+        Only observes write/judgment tools (teach, learn, amplify, etc.).
+        Read-only tools (recall, export, stats, etc.) are excluded.
+        """
+        if tool_name in self._observe_excluded:
+            return
+
+        # Build an observation from the tool call
+        try:
+            obs_text = _tool_to_observation(tool_name, args)
+            if not obs_text:
+                return
+
+            observer = self.auto_observer
+            observer.observe(
+                context=f"tool_call:{tool_name}",
+                observation=obs_text,
+                source=tool_name,
+            )
+
+            # Auto-flush if threshold reached
+            if observer.should_flush():
+                observed = observer.auto_flush()
+                written = observed.get("written", 0)
+                if written > 0:
+                    self._regenerate_conventions(self.store)
+        except Exception:
+            pass  # observation failure never blocks the tool call
+
+    def _shutdown(self):
+        """Flush all observations and persist state on exit."""
+        try:
+            if self._auto_observer:
+                report = self._auto_observer.on_session_end()
+                written = report.get("total_rules_extracted", 0)
+                if written > 0:
+                    self._regenerate_conventions(self.store)
+        except Exception:
+            pass
 
     # ── Core learning handlers ────────────────────────────────────────
 
@@ -1614,6 +1726,79 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _tool_to_observation(tool_name: str, args: dict) -> str:
+    """Convert a tool call into an observation string for auto-capture.
+
+    Each tool type extracts the most relevant information:
+    - teach → the rule being taught
+    - learn → the observation/lesson
+    - amplify → the amplification text
+    - etc.
+    """
+    if tool_name == "teach":
+        domain = args.get("domain", "")
+        rule = args.get("rule", "")
+        rule_type = args.get("rule_type", "")
+        example = args.get("example", "")
+        base = f"[{domain}] {rule_type}: {rule}"
+        if example:
+            base += f"\nExample: {example}"
+        return base
+
+    if tool_name == "learn":
+        ctx = args.get("context", "")
+        obs = args.get("observation", "")
+        lesson = args.get("lesson", "")
+        parts = [p for p in [ctx, obs, lesson] if p]
+        return "\n".join(parts)
+
+    if tool_name == "reflect":
+        ctx = args.get("context", "")
+        patterns = args.get("patterns", [])
+        return ctx + "\n" + "\n".join(f"- {p}" for p in patterns)
+
+    if tool_name == "amplify":
+        rule_id = args.get("rule_id", "")
+        coach = args.get("coach", "")
+        amplification = args.get("amplification", "")
+        return f"Coach {coach} on rule {rule_id}: {amplification}"
+
+    if tool_name == "retain":
+        rule_id = args.get("rule_id", "")
+        reason = args.get("reason", "")
+        return f"Rule {rule_id} retained: {reason}"
+
+    if tool_name == "set_clearance":
+        rule_id = args.get("rule_id", "")
+        clearance = args.get("clearance", "")
+        return f"Clearance set for {rule_id}: {clearance}"
+
+    if tool_name == "succession":
+        action = args.get("action", "")
+        member = args.get("member", "")
+        title = args.get("title", "")
+        detail = args.get("detail", "")
+        if action == "capture":
+            return f"Succession [{member}]: {title}\n{detail}"
+        return f"Succession [{member}]: {action}"
+
+    if tool_name == "federate":
+        project = args.get("project_path", "")
+        name = args.get("project_name", "")
+        return f"Federated from {name or project}"
+
+    if tool_name == "store_outcome":
+        outcome = args.get("outcome", "")
+        feedback = args.get("feedback", "")
+        return f"PR {outcome}: {feedback}"
+
+    # Generic fallback: concatenate string values
+    return " ".join(
+        str(v)[:200] for v in args.values()
+        if isinstance(v, str) and v
+    )
+
+
 def _write_default_domain_configs(domains_dir: Path):
     """Create default domain YAML configs if they don't already exist."""
     _DOMAINS = {
@@ -1982,5 +2167,10 @@ def main():
             "max_rules": max_rules, "include_onboarding": include_onboarding,
         })
         return result[0].text
+
+    # ── Register shutdown hooks ──────────────────────────────────
+    atexit.register(loom._shutdown)
+    signal.signal(signal.SIGTERM, lambda *_: loom._shutdown())
+    signal.signal(signal.SIGINT, lambda *_: loom._shutdown())
 
     mcp.run(transport="stdio")
