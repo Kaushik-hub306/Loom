@@ -50,56 +50,31 @@ Loom is the shared memory layer for your organization's AI agents. Every agent r
 
 ---
 
-## 🆚 Loom vs Glen — Feature Comparison
-
-| Feature | Loom 0.3.0 | Glen |
-|---------|:----------:|:----:|
-| **Org-wide shared memory** | ✅ One store, all agents | ✅ |
-| **Automatic capture** | ✅ Passive `observe` mode | ✅ |
-| **Auto-recall context** | ✅ `recall_relevant` + `session_init` | ✅ |
-| **Per-observation RBAC** | ✅ 5 clearance levels | ✅ |
-| **Auditable timeline** | ✅ Full queryable history | ✅ |
-| **Infinite retention** | ✅ Permanent + long-term tiers | ✅ |
-| **Instant onboarding** | ✅ Role-based packs | ✅ |
-| **Succession capture** | ✅ Full knowledge transfer | ✅ |
-| **Coaching amplification** | ✅ Scale top performers | ✅ |
-| **Explicit teaching** | ✅ `teach` tool for direct rules | ❌ |
-| **Configurable domains** | ✅ 8 domains, add your own YAML | ❌ |
-| **Dual extraction** | ✅ Keyword (free) + LLM (Claude) | ❌ |
-| **Confidence decay** | ✅ Smart tiered decay | ❌ |
-| **Security layer** | ✅ Redaction, integrity, audit, tokens | ❌ |
-| **Open source** | ✅ MIT license, audit the code | ❌ |
-| **Self-hosted** | ✅ Runs locally, no cloud dependency | ❌ |
-| **Cloud optional** | ✅ Can federate to shared store | ✅ Cloud-only |
-| **Pricing** | ✅ Free, forever | 🔒 Waitlist |
-
----
-
 ## 🔌 MCP Server — 18 Powerful Tools
 
 Loom runs as an **MCP (Model Context Protocol) server** over stdio. Your AI agents call its tools directly during coding sessions.
 
 ### Core Learning
-| Tool | Description | Glen Equivalent |
-|------|-------------|-----------------|
-| `learn` | Learn from observation | Automatic capture |
-| `teach` | Teach a rule directly | — *(Loom exclusive)* |
-| `reflect` | Reflect on completed work | — |
+| Tool | Description |
+|------|-------------|
+| `learn` | Learn from observation |
+| `teach` | Teach a rule directly |
+| `reflect` | Reflect on completed work |
 
-### Glen-Level Features
-| Tool | Description | Glen Equivalent |
-|------|-------------|-----------------|
-| `recall_relevant` | Auto-recall everything relevant to a task | Glen's pre-loaded context |
-| `observe` | Passive observation — silent background capture | "Nothing to write down" |
-| `session_init` | Pre-load all relevant context at session start | Glen's auto-context |
-| `onboard` | Generate onboarding pack for a new team member | Instant onboarding |
-| `succession` | Capture departing member's knowledge | Knowledge retention |
-| `amplify` | Amplify coaching across the team | Coaching amplification |
-| `retain` | Mark a rule for permanent retention | Infinite memory |
-| `set_clearance` | Set per-observation access control | Per-observation RBAC |
-| `timeline` | Query the auditable organization timeline | Auditable timeline |
-| `federate` | Ingest rules from other projects | Cross-project memory |
-| `export_timeline` | Export full org history | — |
+### Advanced Features
+| Tool | Description |
+|------|-------------|
+| `recall_relevant` | Auto-recall everything relevant to a task |
+| `observe` | Passive observation — silent background capture |
+| `session_init` | Pre-load all relevant context at session start |
+| `onboard` | Generate onboarding pack for a new team member |
+| `succession` | Capture departing member's knowledge |
+| `amplify` | Amplify coaching across the team |
+| `retain` | Mark a rule for permanent retention |
+| `set_clearance` | Set per-observation access control |
+| `timeline` | Query the auditable organization timeline |
+| `federate` | Ingest rules from other projects |
+| `export_timeline` | Export full org history |
 
 ### Essentials
 | Tool | Description |
@@ -192,7 +167,7 @@ The `.loom/` directory is designed to be committed to your repo so your entire t
 
 ---
 
-## 🧩 Glen-Level Feature Highlights
+## 🧩 Feature Highlights
 
 ### 🧠 Automatic Capture — "Nothing to Write Down"
 Agents don't need to remember to call tools. The `observe` tool silently captures observations in the background with configurable sensitivity (silent/normal/eager). When enough context accumulates, Loom auto-flushes and extracts conventions — no manual documentation overhead.
@@ -409,8 +384,8 @@ loom/
 │   ├── domain_extractor.py        # Config-driven rule extraction (8 domains)
 │   ├── llm_extractor.py           # Claude-powered extraction (optional)
 │   ├── decay_manager.py           # Confidence decay over time
-│   ├── auto_observer.py           # Silent passive observation (Glen capture)
-│   ├── context_loader.py          # Smart auto-recall (Glen pre-loaded context)
+│   ├── auto_observer.py           # Silent passive observation
+│   ├── context_loader.py          # Smart auto-recall
 │   ├── org_store.py               # Cross-project org-wide shared memory
 │   ├── timeline.py                # Auditable, append-only org history
 │   └── retention.py               # Tiered retention (permanent → transient)
@@ -423,7 +398,7 @@ loom/
 │   ├── integrity.py               # Checksum verification
 │   ├── audit.py                   # Append-only audit log
 │   ├── access.py                  # Token-based access control
-│   └── rbac.py                    # Per-observation RBAC (Glen-style)
+│   └── rbac.py                    # Per-observation RBAC
 ├── onboarding/             # Onboarding & knowledge transfer
 │   ├── packs.py                   # Role-based onboarding packs
 │   └── succession.py              # Departing member knowledge capture
