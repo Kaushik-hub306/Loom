@@ -654,6 +654,14 @@ class LoomMCPServer:
         except Exception:
             pass
 
+    def _extraction_status(self) -> str:
+        """Return a human-readable extraction engine status."""
+        from loom.engine.llm_extractor import LLMExtractor
+        llm = LLMExtractor()
+        if llm.is_available:
+            return f"{llm.active_provider_name} (LLM)"
+        return "keyword (free)"
+
     # ── Core learning handlers ────────────────────────────────────────
 
     def _handle_learn(self, args: dict) -> list:
@@ -1178,6 +1186,7 @@ class LoomMCPServer:
             f"## 📊 Loom Stats\n",
             f"**Project rules:** {stats['total']}",
             f"**Average confidence:** {stats['avg_confidence']:.1f}/10",
+            f"**Extraction engine:** {self._extraction_status()}",
             "",
         ]
 
