@@ -331,41 +331,50 @@ class AutoObserver:
         return total >= effective_min
 
     def flush(self, domain: str) -> dict[str, Any]:
-        """Extract rules from all buffered observations for *domain*.
+        """Extract rules from all buffered observations for *domain*."""
+        import asyncio
 
-        Empties the buffer for this domain after extraction.  Extraction
-        uses the LLMExtractor when available, falling back to the
-        DomainExtractor's keyword-based extraction.
-
-        Returns a dict with keys ``extracted``, ``written``, ``boosted``,
-        and ``skipped``.
-        """
         observations = self._buffer.pop(domain, [])
         if not observations:
             return {"extracted": 0, "written": 0, "boosted": 0, "skipped": 0}
+
+        # If we're inside an event loop, schedule async extraction
+        # as a background task — blocking would deadlock.
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._flush_domain_async(domain))
+                # Put observations back so the async task can process them
+                # _flush_domain_async pops from the buffer, so we need to
+                # store them for the async path.
+                self._buffer[domain] = observations
+                return {"extracted": 0, "written": 0, "boosted": 0, "skipped": 0,
+                        "scheduled": True, "count": len(observations)}
+        except RuntimeError:
+            pass  # no event loop — do sync extraction below
 
         rules = self.extract_from_observations(observations, domain=domain)
         return self._write_rules(rules, domain=domain)
 
     def auto_flush(self) -> dict[str, Any]:
-        """Auto-detect the most-represented domain from buffered observations and flush it.
+        """Auto-detect the most-represented domain and flush it."""
+        import asyncio
 
-        When no domain is clearly dominant, flushes the largest buffer
-        (including the unassigned/"" buffer).
-
-        Returns the same dict shape as ``flush()``.
-        """
         if not self._buffer:
             return {"extracted": 0, "written": 0, "boosted": 0, "skipped": 0}
 
-        # Pick the domain with the most buffered observations.
-        # Skip the "" (unknown) key if there's any known-domain buffer.
         known = [(d, len(obs)) for d, obs in self._buffer.items() if d]
-        if known:
-            domain = max(known, key=lambda x: x[1])[0]
-        else:
-            # Only unknown-domain observations exist.
-            domain = ""
+        domain = max(known, key=lambda x: x[1])[0] if known else ""
+
+        # If inside event loop, schedule background flush
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running() and domain:
+                loop.create_task(self._flush_domain_async(domain))
+                return {"extracted": 0, "written": 0, "boosted": 0, "skipped": 0,
+                        "scheduled": True, "domain": domain}
+        except RuntimeError:
+            pass
 
         return self.flush(domain)
 
@@ -401,7 +410,14 @@ class AutoObserver:
         if self.llm_extractor and self.llm_extractor.is_available:
             extracted = self._extract_with_llm(text, domain)
             if extracted:
+                import sys
+                print(f"[Loom] LLM extraction ({self.llm_extractor.active_provider_name}): "
+                      f"{len(extracted)} rules from {len(observations)} observations",
+                      file=sys.stderr, flush=True)
                 return extracted
+            import sys
+            print(f"[Loom] LLM extraction returned empty — check API key and network",
+                  file=sys.stderr, flush=True)
 
         # Fall back to keyword-based extraction.
         return self._extract_with_domain_extractor(text, domain)
@@ -452,36 +468,61 @@ class AutoObserver:
 
     # ── Private extraction helpers ──────────────────────────────────
 
+    async def _extract_with_llm_async(self, text: str, domain: str) -> list[dict]:
+        """Run LLM extraction asynchronously (callable from event loop)."""
+        try:
+            result = await self.llm_extractor.extract(  # type: ignore[union-attr]
+                text, domain=domain
+            )
+            return _extracted_rules_to_dicts(result)
+        except Exception:
+            return []
+
     def _extract_with_llm(self, text: str, domain: str) -> list[dict]:
-        """Run LLM extraction (synchronously wraps the async call)."""
+        """Run LLM extraction synchronously (fallback for non-async callers)."""
         import asyncio
 
         try:
-            # Check if we're already in an event loop (e.g. inside an
-            # async handler).  If not, run a new one.
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # We're inside an async context — create a new task.
-                # This is best-effort; callers inside async functions
-                # should use the async interface directly.
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(
-                        asyncio.run,
-                        self.llm_extractor.extract(  # type: ignore[union-attr]
-                            text, domain=domain
-                        ),
-                    )
-                    result = future.result(timeout=30)
-                return _extracted_rules_to_dicts(result)
-            else:
-                result = loop.run_until_complete(
-                    self.llm_extractor.extract(text, domain=domain)  # type: ignore[union-attr]
+                # We're inside a running event loop — cannot block.
+                # Schedule extraction as a background task instead.
+                # The result will be available on next flush.
+                loop.create_task(
+                    self._flush_domain_async(domain)
                 )
-                return _extracted_rules_to_dicts(result)
+                return []  # don't block — extraction happens in background
+            else:
+                return asyncio.run(
+                    self._extract_with_llm_async(text, domain)
+                )
         except Exception:
             return []
+
+    async def _flush_domain_async(self, domain: str):
+        """Extract and write rules for a domain — async, safe from event loop."""
+        observations = self._buffer.pop(domain, [])
+        if not observations:
+            return
+
+        text = ""
+        grouped = _group_by_context(observations)
+        for ctx, items in grouped.items():
+            text += f"\n## {ctx}\n\n"
+            for i, obs in enumerate(items, 1):
+                text += f"Observation {i}: {obs.observation}\n"
+
+        if self.llm_extractor and self.llm_extractor.is_available:
+            extracted = await self._extract_with_llm_async(text, domain)
+            import sys
+            print(f"[Loom] LLM extraction ({self.llm_extractor.active_provider_name}): "
+                  f"{len(extracted)} rules from {len(observations)} observations",
+                  file=sys.stderr, flush=True)
+        else:
+            extracted = self._extract_with_domain_extractor(text, domain)
+
+        if extracted:
+            self._write_rules(extracted, domain=domain)
 
     def _extract_with_domain_extractor(
         self, text: str, domain: str
