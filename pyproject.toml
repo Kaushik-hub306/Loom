@@ -21,6 +21,9 @@ deepseek = [
 gemini = [
     "google-generativeai>=0.8.0",
 ]
+cloud = [
+    "psycopg2-binary>=2.9",
+]
 
 [project.scripts]
 loom = "loom.cli.main:main"

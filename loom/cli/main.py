@@ -239,23 +239,142 @@ def cmd_doctor(args=None):
     return 0 if all_ok else 1
 
 
+def cmd_cloud_setup(args=None):
+    """Create a Supabase-backed shared Loom database and print config."""
+    import urllib.request
+    import urllib.error
+
+    print("=" * 60)
+    print("  Loom Cloud Setup — Shared Team Memory")
+    print("=" * 60)
+    print()
+    print("  This creates a shared database so your entire team")
+    print("  shares the same conventions in real-time.")
+    print()
+
+    # Get Supabase credentials
+    supabase_url = input("  Supabase URL (e.g. https://xyz.supabase.co): ").strip()
+    if not supabase_url:
+        print("  URL is required.")
+        return
+
+    supabase_key = input("  Supabase service_role key (sbp_...): ").strip()
+    if not supabase_key:
+        print("  Key is required.")
+        return
+
+    project_name = input("  Project name [default: loom-shared]: ").strip()
+    if not project_name:
+        project_name = "loom-shared"
+
+    print()
+    print("  Creating database...")
+
+    # Build the Postgres connection URL from Supabase params
+    # Supabase URL: https://[ref].supabase.co
+    # DB URL: postgresql://postgres:[key]@db.[ref].supabase.co:5432/postgres
+    try:
+        ref = supabase_url.replace("https://", "").replace(".supabase.co", "").strip("/")
+        db_url = f"postgresql://postgres:{supabase_key}@db.{ref}.supabase.co:5432/postgres"
+    except Exception:
+        print("  Invalid Supabase URL format. Expected: https://[ref].supabase.co")
+        return
+
+    # Run migrations
+    try:
+        from loom.storage.postgres_store import PostgresStore
+        from loom.config import StorageConfig
+
+        config = StorageConfig(
+            backend="postgres",
+            database_url=db_url,
+        )
+        store = PostgresStore(config)
+        store.initialize()
+
+        if store.health_check():
+            print("  Database: connected")
+        else:
+            print("  Database: connection failed — check your URL and key")
+            return
+    except ImportError:
+        print("  psycopg2 not installed. Run: pip install loom-agent[cloud]")
+        return
+    except Exception as e:
+        print(f"  Error: {e}")
+        return
+
+    # Generate API key
+    import secrets
+    import hashlib
+    api_key = "loom_sk_" + secrets.token_hex(24)
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+
+    try:
+        with store._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO api_keys (key_hash, key_prefix, project_id, role) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (key_hash, api_key[:10] + "...", project_name, "admin"),
+                )
+                conn.commit()
+    except Exception:
+        pass  # key storage is best-effort
+
+    # Generate config
+    python_path = sys.executable
+    config = {
+        "mcpServers": {
+            "loom": {
+                "command": python_path,
+                "args": ["-m", "loom.mcp"],
+                "env": {
+                    "LOOM_STORAGE_BACKEND": "postgres",
+                    "LOOM_DATABASE_URL": db_url,
+                },
+            }
+        }
+    }
+
+    print()
+    print("=" * 60)
+    print("  Paste this into your Claude Desktop config:")
+    print("=" * 60)
+    print()
+    print(json.dumps(config, indent=2))
+    print()
+    print("  Share this config with your team.")
+    print("  Everyone connects to the same memory.")
+    print()
+    print("  API key (for SaaS later): " + api_key)
+    print()
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: loom <command>")
         print()
         print("Commands:")
-        print("  setup    Generate Claude Desktop config")
-        print("  doctor   Check everything is working")
+        print("  setup        Generate local Claude Desktop config")
+        print("  cloud setup  Create a shared Supabase database for your team")
+        print("  doctor       Check everything is working")
         print()
-        print("Quick start:")
-        print("  1. loom setup   — paste the output into Claude config")
+        print("Quick start (local):")
+        print("  1. loom setup       — paste into Claude config")
         print("  2. restart Claude Desktop")
-        print("  3. loom doctor  — verify everything is green")
+        print("  3. loom doctor      — verify everything is green")
+        print()
+        print("Quick start (team):")
+        print("  1. loom cloud setup — paste Supabase URL + key")
+        print("  2. share the config with your team")
         sys.exit(0)
 
     cmd = sys.argv[1]
     if cmd == "setup":
         cmd_setup()
+    elif cmd == "cloud" and len(sys.argv) > 2 and sys.argv[2] == "setup":
+        cmd_cloud_setup()
     elif cmd == "doctor":
         sys.exit(cmd_doctor())
     else:
