@@ -1,4 +1,16 @@
-"""Allow: python -m loom.mcp"""
-from .server import main
+"""Allow: python -m loom.mcp [--proxy]"""
 
-main()
+import sys
+
+
+def main():
+    if "--proxy" in sys.argv:
+        from .proxy import proxy_main
+        proxy_main()
+    else:
+        from .server import main as server_main
+        server_main()
+
+
+if __name__ == "__main__":
+    main()

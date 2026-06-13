@@ -1,6 +1,6 @@
-# Loom Setup Guide
+# Loom — One-Shot Setup
 
-Loom is an MCP server that acts as the memory layer for AI coding agents. Agents call loom to learn conventions from observation, teaching, and reflection — and to recall what they've learned on future runs.
+Two commands. That's it.
 
 ## 1. Install
 
@@ -8,116 +8,91 @@ Loom is an MCP server that acts as the memory layer for AI coding agents. Agents
 git clone https://github.com/Kaushik-hub306/loom.git
 cd loom
 pip install -e .
-
-# Optional: LLM-powered extraction
-pip install -e ".[llm]"
 ```
 
-## 2. Configure Your Agent
-
-### Claude Desktop
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
-
-```json
-{
-  "mcpServers": {
-    "loom": {
-      "command": "python",
-      "args": ["-m", "loom.mcp"],
-      "env": {
-        "LOOM_PROJECT_ROOT": "/path/to/your/project"
-      }
-    }
-  }
-}
+**For DeepSeek LLM extraction (optional):**
+```bash
+pip install openai
 ```
 
-### Codex CLI
-
-Add to your Codex configuration:
-
-```yaml
-mcp_servers:
-  - name: loom
-    command: python
-    args: ["-m", "loom.mcp"]
-    env:
-      LOOM_PROJECT_ROOT: /path/to/your/project
+**For Anthropic/Claude extraction (optional):**
+```bash
+pip install anthropic
 ```
 
-### Cursor
-
-Add to Cursor's MCP settings (Settings → Features → MCP):
-
-```json
-{
-  "mcpServers": {
-    "loom": {
-      "command": "python",
-      "args": ["-m", "loom.mcp"],
-      "env": {
-        "LOOM_PROJECT_ROOT": "/path/to/your/project"
-      }
-    }
-  }
-}
+**For Gemini extraction (optional):**
+```bash
+pip install google-generativeai
 ```
 
-## 3. Restart Your Agent
+Skip all of these to use free keyword extraction — no API key needed.
 
-After configuring, restart Claude Desktop / Codex / Cursor. Loom's 7 tools will be available:
-
-- `learn` — Report what happened and extract conventions
-- `teach` — Directly inject a convention rule
-- `reflect` — Extract patterns from multiple observations
-- `recall_memory` — Search learned conventions
-- `export` — Export rules in JSON, markdown, or compact format
-- `get_stats` — See what loom has learned
-- `store_outcome` — Backward-compat PR outcome storage
-
-## 4. First Run
-
-Loom auto-bootstraps on first use — it creates `.loom/` with 8 domain configs and initializes the rule store. No manual setup needed.
-
-## 5. LLM Extraction (Optional)
-
-For smarter rule extraction (understands nuance, abstracts patterns), set:
+## 2. Run setup
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-xxx
+loom setup
 ```
 
-Without this, loom uses keyword-based extraction from domain configs — still effective for well-scoped domains, but less nuanced.
+This detects your Python, creates the storage folder, and prints your Claude Desktop config. Copy the JSON it outputs.
+
+If you have an API key for LLM extraction, add it to the `"env"` block before pasting:
+
+```json
+"env": {
+  "LOOM_PROJECT_ROOT": "/path/printed/by/setup",
+  "ANTHROPIC_API_KEY": "sk-ant-..."
+}
+```
+
+Or for DeepSeek:
+
+```json
+"env": {
+  "LOOM_PROJECT_ROOT": "/path/printed/by/setup",
+  "LOOM_LLM_PROVIDER": "deepseek",
+  "LOOM_DEEPSEEK_API_KEY": "sk-..."
+}
+```
+
+Paste into:
+
+| OS | Config file |
+|----|-----------|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+
+## 3. Restart Claude Desktop
+
+## 4. Verify
+
+```bash
+loom doctor
+```
+
+All checks should show `[PASS]`. If anything fails, it tells you exactly what to fix.
+
+## What you get
+
+- **Auto session_init** — conventions injected on first tool call, nothing to remember
+- **Auto observe** — teach/learn/amplify calls auto-captured as observations
+- **18 MCP tools** — teach, learn, recall, observe, amplify, succession, timeline, federate, and more
+- **3 LLM providers** — Anthropic, DeepSeek, or Gemini (free keyword mode by default)
+- **Zero config** — no API keys required, no servers, no Docker, no cloud
 
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `LOOM_PROJECT_ROOT` | No | `$PWD` | Project root directory |
-| `ANTHROPIC_API_KEY` | No | — | API key for LLM-powered extraction |
-| `LOOM_PRIVATE_MODE` | No | — | Set to `1` to block writes (privacy mode) |
+| `LOOM_PROJECT_ROOT` | No | `$PWD` | Where to create `.loom/` |
+| `ANTHROPIC_API_KEY` | No | — | Enable Claude extraction |
+| `LOOM_DEEPSEEK_API_KEY` | No | — | Enable DeepSeek extraction |
+| `GEMINI_API_KEY` | No | — | Enable Gemini extraction |
+| `LOOM_LLM_PROVIDER` | No | auto-detect | Force provider: `anthropic`, `deepseek`, `gemini` |
 
-## Customizing Domains
+## Troubleshooting
 
-Edit `.loom/domains/*.yml` to change keywords, rule types, and extraction patterns. Each domain config:
-
-```yaml
-name: my_domain
-description: What this domain covers
-keywords:          # For auto-detecting which domain feedback belongs to
-  - keyword1
-  - keyword2
-rule_types:        # For stats grouping
-  - type1
-  - type2
-patterns:          # Keyword → rule_type mapping for extraction
-  type1:
-    - trigger word 1
-    - trigger word 2
-  type2:
-    - other trigger
-use_llm: false     # Set true to prefer LLM extraction for this domain
+```bash
+loom doctor
 ```
 
-Add new `.yml` files for custom domains. Loom discovers them automatically.
+Checks: Python version, Loom install, storage writable, domain configs, LLM provider, SDK availability, MCP protocol. Every failure prints the fix.

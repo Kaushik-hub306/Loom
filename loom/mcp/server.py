@@ -366,6 +366,8 @@ class LoomMCPServer:
     def _bootstrap(self):
         if self._bootstrapped:
             return
+        # Auto-create project root directory if it doesn't exist
+        self.project_root.mkdir(parents=True, exist_ok=True)
         if not self.loom_dir.exists():
             self.loom_dir.mkdir(parents=True, exist_ok=True)
             (self.loom_dir / "domains").mkdir(exist_ok=True)
@@ -487,8 +489,23 @@ class LoomMCPServer:
 
     # ── Tool listing ──────────────────────────────────────────────────
 
-    async def list_tools(self) -> list[ToolDef]:
+    def _tool_names(self) -> set[str]:
+        """Return the set of Loom's own 18 tool names (for proxy routing)."""
+        return {
+            "learn", "teach", "reflect", "recall_memory",
+            "recall_relevant", "observe", "export", "export_timeline",
+            "get_stats", "store_outcome", "onboard", "succession",
+            "amplify", "retain", "set_clearance", "timeline",
+            "federate", "session_init",
+        }
+
+    def list_tools_sync(self) -> list[ToolDef]:
+        """Return Loom tool definitions synchronously (for proxy)."""
         self._bootstrap()
+        return self._tool_defs()
+
+    def _tool_defs(self) -> list[ToolDef]:
+        """The full list of 18 tool definitions."""
         return [
             # Core learning (original Loom)
             ToolDef(name="learn", description="Learn from observation — report what happened and what was learned", inputSchema=LEARN_SCHEMA),
@@ -522,6 +539,42 @@ class LoomMCPServer:
             ToolDef(name="federate", description="Ingest rules from another project into the org-wide store", inputSchema=FEDERATE_SCHEMA),
             ToolDef(name="session_init", description="Initialize a session with pre-loaded relevant context — Glen-style auto-context", inputSchema=SESSION_INIT_SCHEMA),
         ]
+
+    async def list_tools(self) -> list[ToolDef]:
+        self._bootstrap()
+        return self._tool_defs()
+
+    def _proxy_observe(self, tool_name: str, args: dict, result: dict):
+        """Auto-observe a proxied (non-Loom) tool call.
+
+        Called by the proxy for every forwarded tools/call.
+        Extracts a summary observation from the tool call + result.
+        """
+        arg_str = json.dumps(args, default=str)[:300]
+        result_str = ""
+        if isinstance(result, dict):
+            content = result.get("result", {}).get("content", [])
+            if content and isinstance(content, list):
+                texts = [c.get("text", "") for c in content if isinstance(c, dict)]
+                result_str = " ".join(texts)[:500]
+
+        obs_text = f"Tool '{tool_name}' called"
+        if arg_str and arg_str != "{}":
+            obs_text += f" with: {arg_str}"
+        if result_str:
+            obs_text += f"\nResult: {result_str}"
+
+        try:
+            observer = self.auto_observer
+            observer.observe(
+                context=f"tool_call:{tool_name}",
+                observation=obs_text,
+                source=tool_name,
+            )
+            if observer.should_flush():
+                observer.auto_flush()
+        except Exception:
+            pass
 
     # ── Tool dispatch ─────────────────────────────────────────────────
 

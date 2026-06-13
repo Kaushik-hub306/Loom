@@ -24,11 +24,7 @@ Loom is the shared memory layer for AI agents. Every agent reads from and writes
 
 ## 🚀 Quick Start
 
-### Prerequisites
-- **Python 3.11+**
-- **An MCP client** (Claude Desktop, Claude Code, Cursor, any MCP host)
-
-### Install
+### 1. Install
 
 ```bash
 git clone https://github.com/Kaushik-hub306/loom.git
@@ -36,66 +32,61 @@ cd loom
 pip install -e .
 ```
 
-### Configure Your MCP Client
+### 2. Setup
 
-**Claude Desktop (macOS):** `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-**Claude Desktop (Windows):** `%APPDATA%\Claude\claude_desktop_config.json`
-
-**Claude Code CLI:** `.mcp.json` in your project root
-
-```json
-{
-  "mcpServers": {
-    "loom": {
-      "command": "python3",
-      "args": ["-m", "loom.mcp"],
-      "env": {
-        "LOOM_PROJECT_ROOT": "/path/to/your/project"
-      }
-    }
-  }
-}
+```bash
+loom setup
 ```
 
-That's it. Restart your client. Loom auto-creates `.loom/` on first use.
+This detects your Python, creates the storage folder, and prints your Claude Desktop config. Copy the JSON it outputs.
 
----
-
-## 🤖 LLM-Powered Extraction (Optional)
-
-Loom uses **keyword extraction by default** — zero cost, zero config, works offline. Add an API key for smarter LLM-powered extraction that understands context and abstracts patterns:
-
-### Anthropic (Claude)
+For LLM-powered extraction, add an API key to the `"env"` block before pasting:
 
 ```json
 "env": {
-  "LOOM_PROJECT_ROOT": "/path/to/your/project",
+  "LOOM_PROJECT_ROOT": "/path/printed/by/setup",
   "ANTHROPIC_API_KEY": "sk-ant-..."
 }
 ```
 
-### DeepSeek
+Or DeepSeek (`pip install openai` first):
 
 ```json
 "env": {
-  "LOOM_PROJECT_ROOT": "/path/to/your/project",
+  "LOOM_PROJECT_ROOT": "/path/printed/by/setup",
   "LOOM_LLM_PROVIDER": "deepseek",
   "LOOM_DEEPSEEK_API_KEY": "sk-..."
 }
 ```
 
-### Gemini
+Or Gemini (`pip install google-generativeai` first):
 
 ```json
 "env": {
-  "LOOM_PROJECT_ROOT": "/path/to/your/project",
+  "LOOM_PROJECT_ROOT": "/path/printed/by/setup",
   "LOOM_LLM_PROVIDER": "gemini",
   "GEMINI_API_KEY": "..."
 }
 ```
 
-Loom auto-detects which provider to use. If no key is set, keyword extraction runs free. You can switch providers any time by changing the env vars — no code changes.
+Paste into your config file:
+
+| OS | Config file |
+|----|-----------|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+
+### 3. Restart Claude Desktop
+
+### 4. Verify
+
+```bash
+loom doctor
+```
+
+All checks should pass. If anything fails, it tells you what to fix.
+
+**No API key?** Keyword extraction works for free — zero cost, zero config. The LLM is optional.
 
 ---
 
@@ -335,8 +326,17 @@ loom/
 | Requirement | Why |
 |-------------|-----|
 | **Python 3.11+** | Type hint syntax, stdlib improvements |
-| **An MCP Client** | Claude Desktop, Claude Code, Cursor, or any MCP host |
-| **LLM API key (optional)** | Anthropic, DeepSeek, or Gemini for smart extraction. Keyword extraction is free by default. |
+| **Claude Desktop / Code / Cursor** | Any MCP-compatible client |
+| **LLM API key (optional)** | Anthropic, DeepSeek, or Gemini for smart extraction. Free keyword extraction by default. |
+| **Optional SDKs** | `pip install openai` (DeepSeek), `pip install anthropic` (Claude), `pip install google-generativeai` (Gemini) |
+
+## 🔧 Troubleshooting
+
+```bash
+loom doctor
+```
+
+Checks Python version, Loom installation, storage, domain configs, LLM provider, SDK availability, and MCP protocol. Prints the fix for any failure.
 
 ---
 
