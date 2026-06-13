@@ -402,9 +402,12 @@ class LoomMCPServer:
     def auto_observer(self):
         if self._auto_observer is None:
             from loom.engine.auto_observer import AutoObserver
+            from loom.engine.llm_extractor import LLMExtractor
+            llm = LLMExtractor()
             self._auto_observer = AutoObserver(
                 store=self.store,
                 domain_extractor=self.extractor,
+                llm_extractor=llm if llm.is_available else None,
             )
         return self._auto_observer
 
