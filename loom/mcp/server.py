@@ -876,7 +876,7 @@ class LoomMCPServer:
                 created_rules.append(rule)
                 created += 1
 
-        self._regenerate_conventions(store, domain)
+        self._regenerate_conventions(store)
 
         # Record in timeline
         for r in created_rules:
@@ -917,7 +917,7 @@ class LoomMCPServer:
             source_type="explicit_teach",
         )
 
-        self._regenerate_conventions(store, domain)
+        self._regenerate_conventions(store)
 
         # Apply retention tier if set
         if retention_tier != "standard":
@@ -972,7 +972,7 @@ class LoomMCPServer:
                 created_rules.append(rule)
                 created += 1
 
-        self._regenerate_conventions(store, domain)
+        self._regenerate_conventions(store)
 
         for r in created_rules:
             self.timeline.record(
@@ -1215,7 +1215,7 @@ class LoomMCPServer:
         if observer.should_flush():
             result = observer.flush(domain)
             written = result.get("written", 0)
-            self._regenerate_conventions(self.store, domain)
+            self._regenerate_conventions(self.store)
             return [_text_result(
                 f"## 👁️ Observed & Learned\n\n"
                 f"Domain: {domain}\n"
