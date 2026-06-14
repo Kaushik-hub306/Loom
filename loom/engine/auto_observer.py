@@ -674,14 +674,21 @@ def _is_noise(text: str) -> bool:
     """Return True when *text* looks like noise, not a learnable convention."""
     stripped = text.strip()
 
+    # Empty or whitespace-only is noise.
+    if not stripped:
+        return True
+
     # Very short utterances are rarely conventions.
     if len(stripped) < 12:
         for pattern in _NOISE_PATTERNS:
             if re.search(pattern, stripped, re.IGNORECASE):
                 return True
-        # Empty or whitespace-only is noise.
-        if not stripped:
-            return True
+        return True  # anything under 12 chars that isn't an explicit "ok/sure/etc" is noise
+
+    # Fewer than 3 words and no convention signal? Noise.
+    word_count = len(stripped.split())
+    if word_count < 3 and not _has_convention_signal(stripped):
+        return True
 
     return False
 
