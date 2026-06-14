@@ -18,7 +18,16 @@ loom init                 # prints config → paste into Claude Desktop
 # restart Claude Desktop  # done
 ```
 
-Loom works for free with keyword extraction. To use an LLM for smarter results, add your API key to the `env` block that `loom init` prints.
+Loom works for free with keyword extraction. To use an LLM for smarter extraction, add your API key to the `env` block that `loom init` prints:
+
+```json
+"env": {
+  "LOOM_PROJECT_ROOT": "/your/project/path",
+  "ANTHROPIC_API_KEY": "sk-ant-..."
+}
+```
+
+DeepSeek or Gemini? Just swap the key — Loom auto-detects the provider.
 
 Verify:
 ```bash
