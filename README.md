@@ -14,21 +14,13 @@
 
 ```bash
 pip install loom-learn    # one command
-loom init                 # prints your Claude Desktop config
-# paste into ~/Library/Application Support/Claude/claude_desktop_config.json
-# restart Claude Desktop
+loom init                 # prints config → paste into Claude Desktop
+# restart Claude Desktop  # done
 ```
 
-**No API key needed.** Loom works with free keyword extraction by default. Add an LLM provider for smarter extraction:
+Loom works for free with keyword extraction. To use an LLM for smarter results, add your API key to the `env` block that `loom init` prints.
 
-```json
-"env": {
-  "LOOM_PROJECT_ROOT": "/path/printed/by/init",
-  "ANTHROPIC_API_KEY": "sk-ant-..."      // or LOOM_DEEPSEEK_API_KEY / GEMINI_API_KEY
-}
-```
-
-Verify everything works:
+Verify:
 ```bash
 loom doctor              # local health checks
 loom doctor --preflight  # validates MCP config before restart
