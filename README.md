@@ -1,265 +1,168 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.11+-blue?style=for-the-badge&logo=python" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/python-3.10+-blue?style=for-the-badge&logo=python" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/protocol-MCP-green?style=for-the-badge" alt="MCP Protocol">
-  <img src="https://img.shields.io/badge/license-MIT-purple?style=for-the-badge" alt="MIT License">
   <img src="https://img.shields.io/badge/version-0.3.0-orange?style=for-the-badge" alt="Version 0.3.0">
 </p>
 
 <h1 align="center">🧠 Loom</h1>
-<p align="center"><strong>Shared learning for AI agents — what any of them learns belongs to your whole org</strong></p>
-<p align="center">An MCP server that observes, learns, and remembers conventions from everything your AI agents do — making every agent smarter over time.</p>
+<p align="center"><strong>Shared memory for AI agents — what any of them learns belongs to your whole org.</strong></p>
+<p align="center">One <code>pip install</code>. Paste a JSON block. Every agent gets smarter with every interaction.</p>
 
 ---
 
-## ✨ What Loom Does
-
-Loom is the shared memory layer for AI agents. Every agent reads from and writes to a single store. Institutional knowledge compounds across your agent fleet rather than being siloed within individual sessions.
-
-**New in this release:**
-- **Auto session_init** — context is injected on the first tool call. The agent never needs to remember.
-- **Auto observe** — teach, learn, amplify, and succession calls are auto-captured as observations.
-- **Multi-provider LLM extraction** — Anthropic, DeepSeek, Gemini. Or free keyword extraction by default.
-
----
-
-## 🚀 Quick Start
-
-### 1. Install
+## Quick Start
 
 ```bash
-git clone https://github.com/Kaushik-hub306/loom.git
-cd loom
-pip install -e .
+pip install loom-learn    # one command
+loom init                 # prints your Claude Desktop config
+# paste into ~/Library/Application Support/Claude/claude_desktop_config.json
+# restart Claude Desktop
 ```
 
-### 2. Setup
-
-```bash
-loom setup
-```
-
-This detects your Python, creates the storage folder, and prints your Claude Desktop config. Copy the JSON it outputs.
-
-For LLM-powered extraction, add an API key to the `"env"` block before pasting:
+**No API key needed.** Loom works with free keyword extraction by default. Add an LLM provider for smarter extraction:
 
 ```json
 "env": {
-  "LOOM_PROJECT_ROOT": "/path/printed/by/setup",
-  "ANTHROPIC_API_KEY": "sk-ant-..."
+  "LOOM_PROJECT_ROOT": "/path/printed/by/init",
+  "ANTHROPIC_API_KEY": "sk-ant-..."      // or LOOM_DEEPSEEK_API_KEY / GEMINI_API_KEY
 }
 ```
 
-Or DeepSeek (`pip install openai` first):
-
-```json
-"env": {
-  "LOOM_PROJECT_ROOT": "/path/printed/by/setup",
-  "LOOM_LLM_PROVIDER": "deepseek",
-  "LOOM_DEEPSEEK_API_KEY": "sk-..."
-}
-```
-
-Or Gemini (`pip install google-generativeai` first):
-
-```json
-"env": {
-  "LOOM_PROJECT_ROOT": "/path/printed/by/setup",
-  "LOOM_LLM_PROVIDER": "gemini",
-  "GEMINI_API_KEY": "..."
-}
-```
-
-Paste into your config file:
-
-| OS | Config file |
-|----|-----------|
-| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
-
-### 3. Restart Claude Desktop
-
-### 4. Verify
-
+Verify everything works:
 ```bash
-loom doctor
+loom doctor              # local health checks
+loom doctor --preflight  # validates MCP config before restart
 ```
 
-All checks should pass. If anything fails, it tells you what to fix.
+---
 
-**No API key?** Keyword extraction works for free — zero cost, zero config. The LLM is optional.
+## What Loom Does
+
+Loom is your team's shared memory layer. Every agent reads from and writes to the same store. When one agent discovers a convention, every agent knows it. When a senior engineer shares why a pattern matters, every new hire's agent gets that context on day one.
+
+| Capability | What it does |
+|-----------|-------------|
+| **Auto-learn** | Hooks fire automatically — no agent needs to remember to call anything |
+| **Auto-recall** | Relevant context injected on first tool call — agent sees Top Reminders, domain rules, coaching, org-wide knowledge |
+| **Teach** | Explicitly inject conventions — agent sees a pattern, teaches it, team benefits |
+| **Onboarding** | New hire's agent already knows the org — roles for 16 positions, from backend to support |
+| **Succession** | Knowledge survives turnover — capture tribal knowledge before someone leaves |
+| **Coaching** | Top performer patterns scale — amplify critical rules with context on why they matter |
+| **Retention** | Permanent org knowledge never decays — mark foundational rules as permanent |
+| **RBAC** | Five clearance levels — public, internal, confidential, restricted, secret |
+| **Timeline** | Auditable org history — query everything learned, by domain, project, or agent |
+| **Federation** | Cross-project knowledge — ingest rules from other projects into the org store |
+| **Redactor** | Auto-strips secrets — API keys, tokens, emails, IPs never reach storage |
+| **Cloud backend** | Postgres via Supabase — `loom cloud setup` provisions a shared database for teams |
+| **Proxy mode** | Loom as single MCP entry point — observes every forwarded tool call |
 
 ---
 
-## 🪝 How Hooks Work
+## 18 MCP Tools
 
-Loom doesn't wait for the agent to remember to call tools. Two hooks fire automatically:
-
-| Hook | When It Fires | What Happens |
-|------|--------------|--------------|
-| **Auto session_init** | First tool call of the session | ContextLoader finds all relevant conventions and injects them into the agent's context |
-| **Auto observe** | Every `teach`, `learn`, `reflect`, `amplify`, `retain`, `set_clearance`, `succession`, `federate` call | The tool call is recorded as an observation in the buffer |
-| **Auto flush** | When the buffer hits threshold, or on process exit | All observations are extracted into rules and written to `.loom/rules.json` |
-
-The agent sees `<!-- LOOM:AUTO_CONTEXT -->` followed by Top Reminders, domain rules, coaching amplifications, and org-wide knowledge — injected automatically. No manual `session_init` call required.
-
-**Tool division:**
-
-| Auto (hooks guarantee) | Explicit (agent decides) |
-|------------------------|-------------------------|
-| `session_init` | `teach` |
-| `observe` | `recall_memory` |
-| `learn` | `export`, `export_timeline` |
-| `reflect` | `get_stats` |
-| `recall_relevant` | `onboard`, `succession` |
-| | `amplify`, `retain` |
-| | `set_clearance`, `timeline` |
-| | `federate`, `store_outcome` |
-
----
-
-## 🔌 18 MCP Tools
-
-### Core Learning
+### Learning
 | Tool | Description |
 |------|-------------|
-| `learn` | Learn from observation — auto-captured by hooks |
-| `teach` | Teach a rule directly — auto-captured by hooks |
-| `reflect` | Reflect on completed work — auto-captured by hooks |
+| `teach` | Teach a rule directly — auto-captured |
+| `learn` | Learn from observation — auto-captured |
+| `reflect` | Extract patterns from multiple observations |
 
 ### Recall
 | Tool | Description |
 |------|-------------|
-| `recall_relevant` | Auto-recall everything relevant to a task |
+| `recall_relevant` | Auto-find context for your current task |
 | `recall_memory` | Search learned conventions |
-| `session_init` | Pre-load context at session start — fires automatically |
-| `observe` | Passive observation — fires automatically |
+| `session_init` | Pre-load context — fires automatically |
+| `observe` | Passive background capture — fires automatically |
 
-### Glen-Level Features
+### Team Knowledge
 | Tool | Description |
 |------|-------------|
-| `onboard` | Generate onboarding pack for a new team member |
+| `onboard` | Generate onboarding pack for any role |
 | `succession` | Capture departing member's knowledge |
 | `amplify` | Amplify coaching across the team |
 | `retain` | Mark a rule for permanent retention |
-| `set_clearance` | Set per-observation access control (public → secret) |
-| `timeline` | Query the auditable organization timeline |
-| `federate` | Ingest rules from other projects |
+| `set_clearance` | Per-rule access control |
+| `timeline` | Query the auditable org history |
+| `federate` | Import rules from other projects |
 
-### Essentials
+### Utilities
 | Tool | Description |
 |------|-------------|
 | `export` | Export rules (markdown, JSON, compact) |
 | `export_timeline` | Export full org history |
-| `get_stats` | Statistics including org-wide and retention data |
-| `store_outcome` | Store PR review outcome (backward compat) |
+| `get_stats` | Statistics by domain, confidence, retention |
+| `store_outcome` | Store PR review outcome |
 
 ---
 
-## 📂 What Loom Creates
+## Dual Backend
+
+**Local (free, default):** Everything stored in `.loom/` — JSON files. Zero config. Commit `rules.json` and `conventions.md` to git so your team shares conventions.
+
+**Cloud (teams):** `loom cloud setup` provisions a Supabase Postgres database. Every agent in your org reads and writes from the same store. Real-time shared memory.
+
+```
+Free (JSON):                        Cloud (Postgres):
+loom init                           loom cloud setup
+→ .loom/ on disk                    → Supabase database
+→ commit to git                     → team shares in real-time
+→ zero cost                         → managed, scalable
+```
+
+---
+
+## What Loom Creates
 
 ```
 your-project/
-├── .loom/
-│   ├── domains/
-│   │   ├── coding.yml          # Software engineering conventions
-│   │   ├── style.yml           # Formatting & style conventions
-│   │   ├── architecture.yml    # Design patterns & module structure
-│   │   ├── process.yml         # Git workflow, CI/CD, review norms
-│   │   ├── testing.yml         # Testing conventions & frameworks
-│   │   ├── security.yml        # Security patterns & practices
-│   │   ├── documentation.yml   # Docs, READMEs, API docs
-│   │   └── general.yml         # Catch-all preferences & best practices
-│   ├── rules.json              # Learned rules with confidence scores
-│   ├── conventions.md          # Human-readable rules doc
-│   ├── timeline.jsonl          # Auditable org history (append-only)
-│   ├── retention.json          # Retention policy assignments
-│   ├── archive.json            # Archived rules (never lost)
-│   ├── permissions.json        # Per-observation RBAC
-│   ├── onboarding/             # Role-based onboarding packs
-│   ├── succession/             # Departing member knowledge capture
-│   └── coaching/               # Coaching amplifications
-```
-
-Commit `.loom/rules.json` and `.loom/conventions.md` to git so your team shares the same conventions.
-
----
-
-## 🔧 Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `LOOM_PROJECT_ROOT` | No | `$PWD` | Where to create `.loom/` |
-| `LOOM_ORG_STORE` | No | `.loom/org-store.json` | Shared org-wide memory path |
-| `ANTHROPIC_API_KEY` | No | — | Enable Anthropic extraction |
-| `LOOM_DEEPSEEK_API_KEY` | No | — | Enable DeepSeek extraction |
-| `GEMINI_API_KEY` | No | — | Enable Gemini extraction |
-| `LOOM_LLM_PROVIDER` | No | auto-detect | Force provider: `anthropic`, `deepseek`, or `gemini` |
-
----
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────────┐
-│              MCP Client (Claude)             │
-│  Auto session_init ──→ first tool call      │
-│  Auto observe ──→ every teach/learn/amplify │
-│  Explicit tools ──→ recall, export, etc.    │
-└──────────────────┬──────────────────────────┘
-                   │ stdio (JSON-RPC)
-┌──────────────────▼──────────────────────────┐
-│           FastMCP Server (loom.mcp)          │
-│  Hook layer: auto session_init + observe    │
-│  18 tools — learn, teach, reflect, recall,  │
-│  observe, onboard, succession, amplify,     │
-│  retain, timeline, federate, session_init   │
-└──────────────────┬──────────────────────────┘
-                   │
-    ┌──────────────┼──────────────────────────┐
-    ▼              ▼              ▼           ▼
-┌────────┐  ┌────────────┐  ┌──────────┐  ┌──────────┐
-│ Rule   │  │  Domain    │  │  LLM      │  │  Org     │
-│ Store  │  │  Extractor │  │  Extractor│  │  Store   │
-│ (JSON) │  │  (YAML)    │  │ (Provider)│  │  (JSON)  │
-└────────┘  └────────────┘  └──────────┘  └──────────┘
-    │              │              │              │
-    └──────────────┼──────────────┼──────────────┘
-                   ▼              ▼
-    ┌──────────┬──────────┬──────────────┬──────────┐
-    │ Auto     │ Context  │  Timeline    │ Retention│
-    │ Observer │ Loader   │  (JSONL)     │  Manager │
-    └──────────┴──────────┴──────────────┴──────────┘
-                   │
-    ┌──────────────┼──────────────────────────────┐
-    ▼              ▼              ▼               ▼
-┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐
-│Onboarding│ │Succession│ │ Coaching │ │  Security    │
-│  Packs   │ │ Capture  │ │Amplifier│ │  Layer (5)   │
-└──────────┘ └──────────┘ └──────────┘ └──────────────┘
+└── .loom/
+    ├── domains/           # 8 domain YAML configs (coding, style, architecture,
+    │                      #   process, testing, security, documentation, general)
+    ├── rules.json         # Learned rules with confidence scores
+    ├── conventions.md     # Human-readable conventions doc
+    ├── timeline.jsonl     # Auditable, append-only org history
+    ├── retention.json     # Permanent-to-transient retention policies
+    ├── archive.json       # Archived rules (never lost)
+    ├── permissions.json   # Per-observation RBAC
+    ├── onboarding/        # Role-based onboarding packs
+    ├── succession/        # Departing member knowledge capture
+    └── coaching/          # Coaching amplifications
 ```
 
 ---
 
-## 📊 Example Session
+## CLI Reference
+
+```bash
+loom init              # Generate config for Claude Desktop
+loom setup             # Same as init
+loom doctor            # Health check — Python, Loom, storage, LLM, MCP
+loom doctor --preflight # Validate MCP config before restart
+loom cloud setup       # Provision Supabase database for team
+```
+
+---
+
+## Example Session
 
 ```
-[Agent starts coding — Loom hooks fire automatically]
+[Agent starts coding]
 
-First tool call → auto session_init injects:
+First tool call → auto session_init fires:
 
 <!-- LOOM:AUTO_CONTEXT -->
 ## 🔍 Relevant Conventions (from Loom)
 
 ### ⚡ Top Reminders
-1. All routes must have explicit type annotations (9/10)
+1. All public functions must have type hints (9/10)
 2. Use async/await for all I/O operations (8/10)
-3. Every new endpoint needs at least one test (9/10)
+3. Every new endpoint needs a test (9/10)
 
 ### By Domain
 #### coding
 - type_safety (9/10): All public functions must have type hints
 - error_handling (8/10): Use custom exception classes
-...
 
 ### 📢 Coaching Amplifications
 - "Use async/await for all I/O" — Sarah Chen (Staff Eng)
@@ -269,77 +172,48 @@ First tool call → auto session_init injects:
 - [api-service] error_handling: Always include request IDs
 - [shared-infra] process: Squash commits before merging
 
-*Session context loaded by Loom*
-
-[Agent continues coding. Every teach/learn/amplify auto-observed.]
-
-Agent: teach(domain="security", rule="Hash passwords with bcrypt",
-             rule_type="cryptography")
-
-[Session ends — auto-flush extracts all observations into rules.]
+[Agent continues. Every teach/learn/amplify auto-observed.
+ Session ends → auto-flush extracts all observations into rules.]
 ```
 
 ---
 
-## 📦 Project Structure
+## Environment Variables
 
-```
-loom/
-├── engine/                 # Core domain logic
-│   ├── rule_store.py              # JSON-backed persistent rule store
-│   ├── domain_extractor.py        # Config-driven keyword extraction (8 domains)
-│   ├── llm_extractor.py           # Provider-agnostic LLM extraction
-│   ├── decay_manager.py           # Confidence decay over time
-│   ├── auto_observer.py           # Silent passive observation with buffer
-│   ├── context_loader.py          # Smart auto-recall by task + role
-│   ├── org_store.py               # Cross-project org-wide shared memory
-│   ├── timeline.py                # Auditable, append-only org history
-│   ├── session_manager.py         # Session lifecycle (create, track, cleanup)
-│   └── retention.py               # Tiered retention (permanent → transient)
-├── llm/                    # Pluggable LLM providers
-│   ├── base.py                    # BaseLLMProvider ABC
-│   ├── anthropic.py               # Claude via anthropic SDK
-│   ├── deepseek.py                # DeepSeek via openai SDK
-│   ├── gemini.py                  # Gemini via google-generativeai SDK
-│   └── factory.py                 # Auto-detect provider from env vars
-├── mcp/                    # MCP server implementation
-│   ├── __main__.py                # Entry point: python3 -m loom.mcp
-│   └── server.py                  # Hook layer + 18 tools
-├── security/               # Security & governance
-│   ├── redactor.py                # PII/secret redaction
-│   ├── private_mode.py            # Privacy mode controls
-│   ├── integrity.py               # Checksum verification
-│   ├── audit.py                   # Append-only audit log
-│   ├── access.py                  # Token-based access control
-│   └── rbac.py                    # Per-observation RBAC (5 levels)
-├── onboarding/             # Onboarding & knowledge transfer
-│   ├── packs.py                   # Role-based onboarding packs
-│   └── succession.py              # Departing member knowledge capture
-└── coaching/               # Coaching amplification
-    └── amplifier.py               # Scale top performer patterns
-```
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `LOOM_PROJECT_ROOT` | No | `$PWD` | Where to create `.loom/` |
+| `LOOM_STORAGE_BACKEND` | No | `json` | `json` or `postgres` |
+| `LOOM_DATABASE_URL` | No | — | Postgres connection string |
+| `LOOM_ORG_STORE` | No | `.loom/org-store.json` | Shared org-wide memory path |
+| `ANTHROPIC_API_KEY` | No | — | Anthropic LLM extraction |
+| `LOOM_DEEPSEEK_API_KEY` | No | — | DeepSeek LLM extraction |
+| `GEMINI_API_KEY` | No | — | Gemini LLM extraction |
+| `LOOM_LLM_PROVIDER` | No | auto-detect | `anthropic`, `deepseek`, or `gemini` |
 
 ---
 
-## 🔧 Requirements
+## Requirements
 
 | Requirement | Why |
 |-------------|-----|
-| **Python 3.11+** | Type hint syntax, stdlib improvements |
-| **Claude Desktop / Code / Cursor** | Any MCP-compatible client |
-| **LLM API key (optional)** | Anthropic, DeepSeek, or Gemini for smart extraction. Free keyword extraction by default. |
-| **Optional SDKs** | `pip install openai` (DeepSeek), `pip install anthropic` (Claude), `pip install google-generativeai` (Gemini) |
+| **Python 3.10+** | Type hint syntax, stdlib improvements |
+| **MCP-compatible client** | Claude Desktop, Code, Cursor |
+| **LLM API key (optional)** | Anthropic, DeepSeek, or Gemini. Free keyword extraction by default. |
 
-## 🔧 Troubleshooting
+---
+
+## Troubleshooting
 
 ```bash
-loom doctor
+loom doctor              # catches most issues
+loom doctor --preflight  # validates full MCP chain
 ```
 
-Checks Python version, Loom installation, storage, domain configs, LLM provider, SDK availability, and MCP protocol. Prints the fix for any failure.
+Preflight checks: Python path in config exists, Loom is importable, MCP config is valid JSON, storage path is writable, MCP module loads without errors. Exits 0 on all green, 1 with specific fix instructions on any failure.
 
 ---
 
 <p align="center">
-  <sub>Built with ❤️ for organizations that want their AI agents to get smarter with every interaction — and never forget.</sub>
+  <sub>Built for teams that want their AI agents to get smarter with every interaction — and never forget.</sub>
 </p>
