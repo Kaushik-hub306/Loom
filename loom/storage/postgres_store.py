@@ -56,11 +56,13 @@ class PostgresStore(StorageBackend):
                 "Set it in your MCP config or environment."
             )
 
+        if "sslmode" not in dsn.lower() and "ssl" not in dsn.lower():
+            dsn += "?sslmode=require" if "?" not in dsn else "&sslmode=require"
+
         self._pool = ThreadedConnectionPool(
             minconn=self.config.db_pool_min,
             maxconn=self.config.db_pool_max,
             dsn=dsn,
-            sslmode="require",  # Required for Supabase / Neon
         )
 
         # Run migrations
@@ -85,10 +87,14 @@ class PostgresStore(StorageBackend):
                         if cur.fetchone():
                             continue
                         cur.execute(sql_file.read_text())
-                        cur.execute(
-                            "INSERT INTO schema_migrations (version) VALUES (%s)",
-                            (version,),
-                        )
+                        try:
+                            cur.execute(
+                                "INSERT INTO schema_migrations (version) VALUES (%s)",
+                                (version,),
+                            )
+                        except Exception:
+                            conn.rollback()
+                            # Migration already recorded — continue
                     conn.commit()
 
     def health_check(self) -> bool:
@@ -250,11 +256,18 @@ class PostgresStore(StorageBackend):
                 row = cur.fetchone()
 
                 # By type
-                cur.execute(
-                    "SELECT rule_type, COUNT(*) FROM rules "
-                    + ("WHERE domain = %s " % (f"'{domain}'") if domain else "")
-                    + "GROUP BY rule_type"
-                )
+                domain_filter = "WHERE domain = %s" if domain else ""
+                if domain:
+                    cur.execute(
+                        "SELECT rule_type, COUNT(*) FROM rules "
+                        + domain_filter + " GROUP BY rule_type",
+                        (domain,),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT rule_type, COUNT(*) FROM rules "
+                        "GROUP BY rule_type"
+                    )
                 by_type = {r[0]: r[1] for r in cur.fetchall()}
 
                 return {

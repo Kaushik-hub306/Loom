@@ -121,9 +121,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-INSERT INTO schema_migrations (version) VALUES ('001_initial')
-ON CONFLICT (version) DO NOTHING;
-
 -- Performance indexes
 CREATE INDEX IF NOT EXISTS idx_rules_domain_conf ON rules(domain, confidence DESC);
 CREATE INDEX IF NOT EXISTS idx_rules_project ON rules(project);

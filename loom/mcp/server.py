@@ -34,6 +34,7 @@ Tools (18 total):
 
 import json
 import os
+import sys
 import uuid
 import atexit
 import signal
@@ -48,6 +49,7 @@ from loom.engine.domain_extractor import DomainExtractor
 from loom.engine.decay_manager import DecayManager
 from loom.engine.retention import RetentionPolicy
 from loom.security.rbac import ClearanceLevel
+from loom.security.redactor import redact_text
 
 # ── JSON Schemas for all 18 tools ────────────────────────────────────
 
@@ -336,9 +338,12 @@ _TASK_DOMAIN_PATTERNS: list[tuple[list[str], list[str]]] = [
 class LoomMCPServer:
     """The complete MCP server — 18 tools, Glen-level feature parity + beyond."""
 
-    def __init__(self, project_root: Path):
+    def __init__(self, project_root: Path, storage_backend: str = "json"):
         self.project_root = Path(project_root)
         self.loom_dir = self.project_root / ".loom"
+        self._storage_backend = storage_backend
+        self._pg_store = None       # PostgresStore (lazy-init)
+        self._pg_initialized = False
         self._bootstrapped = False
         self._auto_observer = None
         self._context_loader = None
@@ -363,33 +368,96 @@ class LoomMCPServer:
         })
 
 
+    def _init_postgres(self):
+        """Initialize the PostgresStore connection and migrate local data."""
+        if self._pg_initialized:
+            return
+        self._pg_initialized = True
+
+        from loom.config import get_config
+        from loom.storage.postgres_store import PostgresStore
+
+        config = get_config()
+        if not config.database_url:
+            raise RuntimeError(
+                "LOOM_DATABASE_URL is required when LOOM_STORAGE_BACKEND=postgres"
+            )
+
+        self._pg_store = PostgresStore(config)
+        self._pg_store.initialize()
+
+        # Migrate existing local data into Postgres (idempotent)
+        if self.loom_dir.exists():
+            try:
+                from loom.storage.adapters import migrate_json_to_postgres
+                result = migrate_json_to_postgres(self.loom_dir, self._pg_store)
+                if result["rules_migrated"] or result["timeline_migrated"]:
+                    import sys
+                    print(
+                        f"[loom] Migrated {result['rules_migrated']} rules, "
+                        f"{result['timeline_migrated']} timeline entries to Postgres.",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                print(f"[loom] postgres_init error: {e}", file=sys.stderr)
+
     def _bootstrap(self):
         if self._bootstrapped:
             return
         # Auto-create project root directory if it doesn't exist
-        self.project_root.mkdir(parents=True, exist_ok=True)
-        if not self.loom_dir.exists():
-            self.loom_dir.mkdir(parents=True, exist_ok=True)
-            (self.loom_dir / "domains").mkdir(exist_ok=True)
-            _write_default_domain_configs(self.loom_dir / "domains")
-            (self.loom_dir / "rules.json").write_text(json.dumps({"rules": []}, indent=2))
-            (self.loom_dir / "conventions.md").write_text(
-                "# Loom Conventions\n\nNot learned yet.\n"
+        try:
+            self.project_root.mkdir(parents=True, exist_ok=True)
+            if not self.loom_dir.exists():
+                self.loom_dir.mkdir(parents=True, exist_ok=True)
+                (self.loom_dir / "domains").mkdir(exist_ok=True)
+                _write_default_domain_configs(self.loom_dir / "domains")
+                (self.loom_dir / "rules.json").write_text(json.dumps({"rules": []}, indent=2))
+                (self.loom_dir / "conventions.md").write_text(
+                    "# Loom Conventions\n\nNot learned yet.\n"
+                )
+                (self.loom_dir / "onboarding").mkdir(exist_ok=True)
+                (self.loom_dir / "succession").mkdir(exist_ok=True)
+                (self.loom_dir / "coaching").mkdir(exist_ok=True)
+                (self.loom_dir / ".gitignore").write_text(
+                    "tokens.json\nintegrity.json\naudit.jsonl\nprivate.jsonl\npermissions.json\n"
+                    "timeline.jsonl\nretention.json\narchive.json\n"
+                )
+        except PermissionError:
+            raise PermissionError(
+                f"Cannot write to {self.loom_dir}. "
+                f"Check directory permissions (try: chmod 755 {self.loom_dir.parent}) "
+                f"or set LOOM_PROJECT_ROOT to a writable directory."
             )
-            (self.loom_dir / "onboarding").mkdir(exist_ok=True)
-            (self.loom_dir / "succession").mkdir(exist_ok=True)
-            (self.loom_dir / "coaching").mkdir(exist_ok=True)
-            (self.loom_dir / ".gitignore").write_text(
-                "tokens.json\nintegrity.json\naudit.jsonl\nprivate.jsonl\npermissions.json\n"
-                "timeline.jsonl\nretention.json\narchive.json\n"
+        except OSError as e:
+            raise OSError(
+                f"Cannot save to {self.loom_dir}: {e}. "
+                f"The disk may be full or the filesystem is read-only. "
+                f"Free up space or set LOOM_PROJECT_ROOT to a different location."
             )
         self._bootstrapped = True
+
+        # Initialize Postgres connection on first bootstrap if configured
+        if self._storage_backend == "postgres":
+            try:
+                self._init_postgres()
+            except Exception as e:
+                import sys
+                # Redact any connection-string details
+                msg = str(e)
+                if "postgresql://" in msg or "postgres://" in msg:
+                    msg = "Database connection failed (connection details redacted)."
+                print(f"[loom] Postgres init failed: {msg}", file=sys.stderr)
+                print("[loom] Falling back to local JSON storage.", file=sys.stderr)
+                self._storage_backend = "json"
 
     # ── Lazy-loaded sub-engines ───────────────────────────────────────
 
     @property
     def store(self) -> RuleStore:
         self._bootstrap()
+        if self._storage_backend == "postgres" and self._pg_store:
+            from loom.storage.adapters import PostgresRuleStore
+            return PostgresRuleStore(self._pg_store)
         return RuleStore(self.loom_dir / "rules.json")
 
     @property
@@ -423,19 +491,27 @@ class LoomMCPServer:
     @property
     def timeline(self):
         if self._timeline is None:
-            from loom.engine.timeline import Timeline
-            self._timeline = Timeline(self.loom_dir)
+            if self._storage_backend == "postgres" and self._pg_store:
+                from loom.storage.adapters import PostgresTimeline
+                self._timeline = PostgresTimeline(self._pg_store)
+            else:
+                from loom.engine.timeline import Timeline
+                self._timeline = Timeline(self.loom_dir)
         return self._timeline
 
     @property
     def retention(self):
         if self._retention is None:
-            from loom.engine.retention import RetentionManager
-            self._retention = RetentionManager(
-                store_dir=self.loom_dir,
-                rule_store=self.store,
-                decay_manager=self.decay,
-            )
+            if self._storage_backend == "postgres" and self._pg_store:
+                from loom.storage.adapters import PostgresRetention
+                self._retention = PostgresRetention(self._pg_store)
+            else:
+                from loom.engine.retention import RetentionManager
+                self._retention = RetentionManager(
+                    store_dir=self.loom_dir,
+                    rule_store=self.store,
+                    decay_manager=self.decay,
+                )
         return self._retention
 
     @property
@@ -444,7 +520,7 @@ class LoomMCPServer:
             from loom.onboarding.packs import OnboardingManager
             self._onboarding = OnboardingManager(
                 store=self.store,
-                packs_dir=self.loom_dir / "onboarding",
+                store_dir=self.loom_dir,
             )
         return self._onboarding
 
@@ -471,20 +547,28 @@ class LoomMCPServer:
     @property
     def rbac(self):
         if self._rbac is None:
-            from loom.security.rbac import RBACEngine
-            self._rbac = RBACEngine(self.loom_dir / "permissions.json")
+            if self._storage_backend == "postgres" and self._pg_store:
+                from loom.storage.adapters import PostgresRBAC
+                self._rbac = PostgresRBAC(self._pg_store)
+            else:
+                from loom.security.rbac import RBACEngine
+                self._rbac = RBACEngine(self.loom_dir / "permissions.json")
         return self._rbac
 
     @property
     def org_store(self):
         if self._org_store is None:
-            from loom.engine.org_store import OrgStore
-            # Use project-local path when LOOM_ORG_STORE is not set
-            # and we have a project root — keeps test fixtures isolated.
-            org_path = None
-            if not os.environ.get("LOOM_ORG_STORE"):
-                org_path = self.loom_dir / "org-store.json"
-            self._org_store = OrgStore(path=org_path)
+            if self._storage_backend == "postgres" and self._pg_store:
+                from loom.storage.adapters import PostgresOrgStoreAdapter
+                self._org_store = PostgresOrgStoreAdapter(self._pg_store)
+            else:
+                from loom.engine.org_store import OrgStore
+                # Use project-local path when LOOM_ORG_STORE is not set
+                # and we have a project root — keeps test fixtures isolated.
+                org_path = None
+                if not os.environ.get("LOOM_ORG_STORE"):
+                    org_path = self.loom_dir / "org-store.json"
+                self._org_store = OrgStore(path=org_path)
         return self._org_store
 
     # ── Tool listing ──────────────────────────────────────────────────
@@ -573,8 +657,8 @@ class LoomMCPServer:
             )
             if observer.should_flush():
                 observer.auto_flush()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] auto_observer error: {e}", file=sys.stderr)
 
     # ── Tool dispatch ─────────────────────────────────────────────────
 
@@ -659,8 +743,8 @@ class LoomMCPServer:
                 formatted = loader.format_context_block(block)
                 self.auto_observer.on_session_start()
                 return formatted
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] session error: {e}", file=sys.stderr)
 
         self.auto_observer.on_session_start()
         return ""
@@ -680,6 +764,19 @@ class LoomMCPServer:
             if not obs_text:
                 return
 
+            # Redact secrets before storage
+            try:
+                redacted = redact_text(obs_text)
+                if redacted.secrets_found > 0:
+                    print(
+                        f"[loom] Redacted {redacted.secrets_found} secret(s) "
+                        f"from observation",
+                        file=sys.stderr,
+                    )
+                obs_text = redacted.text
+            except Exception as e:
+                print(f"[loom] redactor error: {e}", file=sys.stderr)
+
             observer = self.auto_observer
             observer.observe(
                 context=f"tool_call:{tool_name}",
@@ -693,19 +790,26 @@ class LoomMCPServer:
                 written = observed.get("written", 0)
                 if written > 0:
                     self._regenerate_conventions(self.store)
-        except Exception:
-            pass  # observation failure never blocks the tool call
+        except Exception as e:
+            print(f"[loom] auto_observer error: {e}", file=sys.stderr)
 
     def _shutdown(self):
-        """Flush all observations and persist state on exit."""
+        """Flush all observations, persist state, and close DB connections on exit."""
         try:
             if self._auto_observer:
                 report = self._auto_observer.on_session_end()
                 written = report.get("total_rules_extracted", 0)
                 if written > 0:
                     self._regenerate_conventions(self.store)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] session error: {e}", file=sys.stderr)
+        finally:
+            # Close Postgres connection pool
+            if self._pg_store and self._pg_store._pool:
+                try:
+                    self._pg_store._pool.closeall()
+                except Exception as e:
+                    print(f"[loom] postgres_init error: {e}", file=sys.stderr)
 
     def _extraction_status(self) -> str:
         """Return a human-readable extraction engine status."""
@@ -812,8 +916,8 @@ class LoomMCPServer:
         if retention_tier != "standard":
             try:
                 self.retention.set_retention(rule.id, RetentionPolicy(retention_tier))
-            except Exception:
-                pass  # retention module may not be fully wired yet
+            except Exception as e:
+                print(f"[loom] retention error: {e}", file=sys.stderr)
 
         # Record in timeline
         self.timeline.record(
@@ -970,8 +1074,6 @@ class LoomMCPServer:
         for r in broad_results:
             if r not in all_results:
                 all_results.append(r)
-            if r not in all_results:
-                all_results.append(r)
 
         # Sort by confidence and deduplicate
         seen_ids = set()
@@ -1049,8 +1151,8 @@ class LoomMCPServer:
                     lines.append(f"- **{c.original_rule or ''}** — by {c.coach or ''}")
                     if c.amplification:
                         lines.append(f"  {c.amplification[:200]}...")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] coaching error: {e}", file=sys.stderr)
 
         # Org-wide context if requested
         if include_org:
@@ -1065,8 +1167,8 @@ class LoomMCPServer:
                     lines.append("### 🌐 Org-Wide Knowledge")
                     for r in org_rules[:5]:
                         lines.append(f"- [{r.project or 'org'}] **{r.rule_type or ''}**: {r.rule or ''}")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[loom] org_store error: {e}", file=sys.stderr)
 
         return [_text_result("\n".join(lines))]
 
@@ -1085,6 +1187,19 @@ class LoomMCPServer:
             extractor = DomainExtractor(self.loom_dir / "domains")
             detected = extractor.detect_domain(content)
             domain = detected or "general"
+
+        # Redact secrets before storage
+        try:
+            redacted = redact_text(content)
+            if redacted.secrets_found > 0:
+                print(
+                    f"[loom] Redacted {redacted.secrets_found} secret(s) "
+                    f"from observe content",
+                    file=sys.stderr,
+                )
+            content = redacted.text
+        except Exception as e:
+            print(f"[loom] redactor error: {e}", file=sys.stderr)
 
         # Feed to the observer
         observer.observe(context=context, observation=content, domain=domain)
@@ -1136,8 +1251,8 @@ class LoomMCPServer:
                 try:
                     org_rules = self.org_store.get_org_rules(min_confidence=min_conf)
                     data.append({"__org_rules__": len(org_rules), "org_store": "use export_timeline for full org export"})
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[loom] org_store error: {e}", file=sys.stderr)
             return [_text_result(json.dumps(data, indent=2))]
 
         elif fmt == "compact":
@@ -1264,8 +1379,8 @@ class LoomMCPServer:
                 lines.append(f"  - Long-term: {health.get('long_term', 0)}")
                 lines.append(f"  - Standard: {health.get('standard', 0)}")
                 lines.append(f"  - Decaying: {health.get('decaying', 0)}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] retention error: {e}", file=sys.stderr)
 
         # Org stats
         if include_org:
@@ -1275,8 +1390,8 @@ class LoomMCPServer:
                     lines.append(f"\n### Org-Wide")
                     lines.append(f"  - Total org rules: {org_stats['total_rules']}")
                     lines.append(f"  - Projects: {', '.join(org_stats.get('by_project', {}).keys())}")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[loom] org_store error: {e}", file=sys.stderr)
 
         # Timeline stats
         try:
@@ -1285,8 +1400,8 @@ class LoomMCPServer:
                 lines.append(f"\n### Recent Activity")
                 lines.append(f"  - Total entries: {summary.get('total_entries', 0)}")
                 lines.append(f"  - Avg confidence: {summary.get('avg_confidence', 0):.1f}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] timeline error: {e}", file=sys.stderr)
 
         return [_text_result("\n".join(lines))]
 
@@ -1392,8 +1507,8 @@ class LoomMCPServer:
                     ts = d.timestamp[:10] if d.timestamp else ""
                     lines.append(f"- **{ts}**: {(d.rule_text or '')[:150]}")
                 lines.append("")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] timeline error: {e}", file=sys.stderr)
 
         # Succession knowledge
         if include_succession:
@@ -1407,8 +1522,8 @@ class LoomMCPServer:
                     lines.append("")
                     lines.append("*Use `succession` to view full details.*")
                     lines.append("")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[loom] succession error: {e}", file=sys.stderr)
 
         # Coaching amplifications
         try:
@@ -1419,8 +1534,8 @@ class LoomMCPServer:
                 for c in coaching[:5]:
                     lines.append(f"- **{c.original_rule or ''}** — by {c.coach or ''}")
                 lines.append("")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] coaching error: {e}", file=sys.stderr)
 
         lines.append("---")
         lines.append(f"*Generated by Loom — the memory layer for AI agents*")
@@ -1434,8 +1549,8 @@ class LoomMCPServer:
                 domain_filters=domains,
                 custom_notes=custom_notes,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] onboarding error: {e}", file=sys.stderr)
 
         return [_text_result("\n".join(lines))]
 
@@ -1506,8 +1621,8 @@ class LoomMCPServer:
                         coach=member,
                         coach_role=role,
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[loom] succession error: {e}", file=sys.stderr)
 
             return [_text_result(rendered)]
 
@@ -1736,8 +1851,8 @@ class LoomMCPServer:
                         rule = self.store.get_rule(rule_id)
                         if rule:
                             lines.append(f"- **{rule.rule_type}**: {rule.rule}")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[loom] onboarding error: {e}", file=sys.stderr)
 
         # Add timeline summary
         try:
@@ -1746,8 +1861,8 @@ class LoomMCPServer:
                 lines.append("")
                 lines.append(f"---")
                 lines.append(f"*This week: {summary['total_entries']} things learned across the org.*")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] timeline error: {e}", file=sys.stderr)
 
         lines.append("")
         lines.append("*Session context loaded by Loom — the memory layer for AI agents*")
@@ -1755,8 +1870,8 @@ class LoomMCPServer:
         # Reset auto-observer for new session
         try:
             self.auto_observer.on_session_start()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loom] session error: {e}", file=sys.stderr)
 
         return [_text_result("\n".join(lines))]
 
@@ -2010,9 +2125,9 @@ def _write_default_domain_configs(domains_dir: Path):
         yml_file.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
 
 
-def create_loom_server(project_root: Path) -> LoomMCPServer:
+def create_loom_server(project_root: Path, storage_backend: str = "json") -> LoomMCPServer:
     """Create a Loom MCP server pointed at a project root."""
-    return LoomMCPServer(Path(project_root))
+    return LoomMCPServer(Path(project_root), storage_backend=storage_backend)
 
 
 def main():
@@ -2020,7 +2135,8 @@ def main():
     from mcp.server.fastmcp import FastMCP
 
     project_root = Path(os.environ.get("LOOM_PROJECT_ROOT", os.getcwd()))
-    loom = create_loom_server(project_root)
+    storage_backend = os.environ.get("LOOM_STORAGE_BACKEND", "json")
+    loom = create_loom_server(project_root, storage_backend=storage_backend)
 
     mcp = FastMCP("loom")
 
@@ -2235,7 +2351,7 @@ def main():
 
     # ── Register shutdown hooks ──────────────────────────────────
     atexit.register(loom._shutdown)
-    signal.signal(signal.SIGTERM, lambda *_: loom._shutdown())
-    signal.signal(signal.SIGINT, lambda *_: loom._shutdown())
+    signal.signal(signal.SIGTERM, lambda *_: (loom._shutdown(), sys.exit(0)))
+    signal.signal(signal.SIGINT, lambda *_: (loom._shutdown(), sys.exit(0)))
 
     mcp.run(transport="stdio")

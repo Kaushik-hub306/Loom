@@ -239,6 +239,168 @@ def cmd_doctor(args=None):
     return 0 if all_ok else 1
 
 
+def _claude_config_path() -> Path | None:
+    """Return the OS-specific Claude Desktop config path, or None."""
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    elif sys.platform == "win32":
+        return Path(os.environ.get("APPDATA", "")) / "Claude" / "claude_desktop_config.json"
+    else:
+        return home / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+def cmd_preflight(config_path: str | None = None):
+    """Validate that Loom will work when Claude Desktop launches it.
+
+    Parses the Claude Desktop config, checks the Python path, verifies
+    Loom is importable, and validates the MCP transport chain.
+    """
+    import subprocess
+
+    print("=" * 60)
+    print("  Loom Preflight — MCP Chain Validation")
+    print("=" * 60)
+    print()
+
+    # Resolve config path
+    if config_path:
+        cfg = Path(config_path).expanduser()
+    else:
+        cfg = _claude_config_path()
+
+    print(f"  Config: {cfg}")
+    print()
+
+    checks = []
+    all_ok = True
+
+    # 1. Config file exists and is valid JSON
+    if not cfg.exists():
+        print(f"  [FAIL] Config file not found: {cfg}")
+        print(f"         Run 'loom setup' first, or use --config-path to specify")
+        print()
+        return 1
+    else:
+        try:
+            config_data = json.loads(cfg.read_text())
+            checks.append(("Config file", True, "found and valid JSON"))
+        except json.JSONDecodeError as e:
+            print(f"  [FAIL] Config file is not valid JSON: {e}")
+            print()
+            return 1
+
+    # 2. Find Loom in the mcpServers block
+    mcp_servers = config_data.get("mcpServers", {})
+    loom_config = mcp_servers.get("loom")
+    if not loom_config:
+        print(f"  [FAIL] No 'loom' entry found in mcpServers")
+        print(f"         Run 'loom setup' and paste its output into the config.")
+        print()
+        return 1
+
+    command = loom_config.get("command", "")
+    args_list = loom_config.get("args", [])
+    env_vars = loom_config.get("env", {})
+
+    # 3. Python executable exists and is executable
+    python_exe = command
+    if not python_exe:
+        python_exe = shutil.which("python3") or shutil.which("python") or ""
+    if not python_exe:
+        print(f"  [FAIL] No Python command found in config")
+        print(f"         Set 'command' to your Python path (e.g., which python3)")
+        print()
+        return 1
+
+    exe_path = Path(python_exe)
+    if not exe_path.is_file() and not shutil.which(python_exe):
+        print(f"  [FAIL] Python not found: {python_exe}")
+        print(f"         Full path or install Python 3.10+ and retry.")
+        print()
+        return 1
+    checks.append(("Python path", True, str(python_exe)))
+
+    # 4. Loom is importable
+    try:
+        result = subprocess.run(
+            [python_exe, "-c", "import loom"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            checks.append(("Loom import", True, "loom package found"))
+        else:
+            print(f"  [FAIL] Loom package not importable from {python_exe}")
+            print(f"         {result.stderr.strip()}")
+            print(f"         Run: {python_exe} -m pip install loom-agent")
+            print()
+            return 1
+    except subprocess.TimeoutExpired:
+        print(f"  [FAIL] Python import check timed out after 10s")
+        print()
+        return 1
+    except Exception as e:
+        print(f"  [FAIL] Cannot run Python: {e}")
+        print()
+        return 1
+
+    # 5. Storage path is writable (if configured)
+    project_root = env_vars.get("LOOM_PROJECT_ROOT", "")
+    if project_root:
+        pr = Path(project_root).expanduser()
+        if pr.exists():
+            if os.access(pr, os.W_OK):
+                checks.append(("Storage path", True, f"{pr} (writable)"))
+            else:
+                checks.append(("Storage path", False, f"{pr} (NOT writable — check permissions)"))
+                all_ok = False
+        else:
+            try:
+                pr.mkdir(parents=True, exist_ok=True)
+                checks.append(("Storage path", True, f"{pr} (created)"))
+            except Exception as e:
+                checks.append(("Storage path", False, f"{pr} (cannot create: {e})"))
+                all_ok = False
+    else:
+        checks.append(("Storage path", True, "not set (defaults to $PWD at runtime)"))
+
+    # 6. MCP module loads
+    try:
+        result = subprocess.run(
+            [python_exe, "-c", "from loom.mcp.server import LoomMCPServer"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            checks.append(("MCP module", True, "loom.mcp.server loads"))
+        else:
+            print(f"  [FAIL] loom.mcp.server failed to load")
+            print(f"         {result.stderr.strip()}")
+            print()
+            return 1
+    except subprocess.TimeoutExpired:
+        print(f"  [FAIL] MCP module load check timed out after 10s")
+        print()
+        return 1
+
+    # Print results
+    print()
+    for name, ok, detail in checks:
+        status = "PASS" if ok else "FAIL"
+        if not ok:
+            all_ok = False
+        print(f"  [{status}] {name}")
+        if detail:
+            print(f"         {detail}")
+
+    print()
+    if all_ok:
+        print("  All preflight checks passed. Ready to restart Claude Desktop.")
+    else:
+        print("  Some checks failed. Fix the FAIL items above.")
+    print()
+    return 0 if all_ok else 1
+
+
 def cmd_cloud_setup(args=None):
     """Create a Supabase-backed shared Loom database and print config."""
     import urllib.request
@@ -347,6 +509,12 @@ def cmd_cloud_setup(args=None):
     print("  Share this config with your team.")
     print("  Everyone connects to the same memory.")
     print()
+    print("  ⚠️  SECURITY: This config contains database credentials.")
+    print("     Restrict file permissions: chmod 600 ~/Library/Application\\\\")
+    print("     Support/Claude/claude_desktop_config.json")
+    print("     Do not commit this file to git — it contains your Supabase")
+    print("     service_role key which has full database access.")
+    print()
     print("  API key (for SaaS later): " + api_key)
     print()
 
@@ -357,8 +525,10 @@ def main():
         print()
         print("Commands:")
         print("  setup        Generate local Claude Desktop config")
+        print("  init         Same as setup — initialize Loom in this project")
         print("  cloud setup  Create a shared Supabase database for your team")
         print("  doctor       Check everything is working")
+        print("  doctor --preflight  Validate MCP config before restart")
         print()
         print("Quick start (local):")
         print("  1. loom setup       — paste into Claude config")
@@ -376,7 +546,19 @@ def main():
     elif cmd == "cloud" and len(sys.argv) > 2 and sys.argv[2] == "setup":
         cmd_cloud_setup()
     elif cmd == "doctor":
-        sys.exit(cmd_doctor())
+        if "--preflight" in sys.argv:
+            # Extract optional --config-path argument
+            cp_idx = None
+            try:
+                cp_idx = sys.argv.index("--config-path")
+            except ValueError:
+                pass
+            config_path = sys.argv[cp_idx + 1] if cp_idx and cp_idx + 1 < len(sys.argv) else None
+            sys.exit(cmd_preflight(config_path))
+        else:
+            sys.exit(cmd_doctor())
+    elif cmd == "init":
+        cmd_setup()
     else:
         print(f"Unknown command: {cmd}")
         print("Run 'loom' without arguments to see available commands.")

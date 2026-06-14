@@ -5,6 +5,8 @@ Supports Anthropic, DeepSeek, and Gemini via the provider abstraction in
 keyword-based extraction via ``DomainExtractor`` — the zero-cost default.
 """
 
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +41,24 @@ class LLMExtractor:
     def provider(self) -> BaseLLMProvider | None:
         """The active provider (lazy-loaded from env vars if not injected)."""
         if self._provider is None:
-            self._provider = get_provider()
+            try:
+                self._provider = get_provider()
+            except ImportError as e:
+                provider_name = os.environ.get("LOOM_LLM_PROVIDER", "anthropic")
+                pkgs = {
+                    "anthropic": "pip install loom-agent[llm]",
+                    "deepseek": "pip install loom-agent[deepseek]",
+                    "gemini": "pip install loom-agent[gemini]",
+                }
+                pkg_cmd = pkgs.get(provider_name, "pip install loom-agent[llm]")
+                import sys
+                print(
+                    f"[loom] LLM provider '{provider_name}' requires an SDK "
+                    f"that is not installed. Run: {pkg_cmd}. "
+                    f"Falling back to keyword extraction (free, no API key needed).",
+                    file=sys.stderr,
+                )
+                self._provider = None
         return self._provider
 
     @property

@@ -256,16 +256,24 @@ class LoomProxy:
                 pass  # observation never blocks
 
             # Also ensure session is initialized (first proxied call triggers it)
+            session_header = ""
             try:
-                self.loom._ensure_session_init(tool_args)
+                session_header = self.loom._ensure_session_init(tool_args)
             except Exception:
                 pass
 
-            # Return the proxied response, possibly with Loom context injected
+            # Inject Loom session context into the proxied response
+            result = resp.get("result", resp)
+            if session_header and isinstance(result, dict):
+                content = result.get("content", [])
+                if isinstance(content, list):
+                    content.insert(0, {"type": "text", "text": session_header})
+                    result = {**result, "content": content}
+
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
-                "result": resp.get("result", resp),
+                "result": result,
             }
 
         # Pass through notifications (no response)
