@@ -142,8 +142,10 @@ def cmd_doctor(args=None):
     # 4. .loom/ directory
     loom_dir = project_root / ".loom"
     loom_dir_ok = loom_dir.exists()
-    checks.append((".loom/ exists", loom_dir_ok,
-                   str(loom_dir) if loom_dir_ok else "will be created on first use"))
+    if loom_dir_ok:
+        checks.append((".loom/ exists", True, str(loom_dir)))
+    else:
+        checks.append((".loom/ exists", True, "will be created when MCP server starts"))
 
     # 5. Rules and timeline
     if loom_dir_ok:
