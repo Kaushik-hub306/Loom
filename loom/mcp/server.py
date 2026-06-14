@@ -634,13 +634,20 @@ class LoomMCPServer:
         Called by the proxy for every forwarded tools/call.
         Extracts a summary observation from the tool call + result.
         """
-        arg_str = json.dumps(args, default=str)[:300]
+        def _truncate_words(s: str, max_chars: int) -> str:
+            """Truncate at word boundary, not mid-word."""
+            if len(s) <= max_chars:
+                return s
+            cut = s[:max_chars].rsplit(" ", 1)[0]
+            return cut if cut else s[:max_chars]
+
+        arg_str = _truncate_words(json.dumps(args, default=str), 300)
         result_str = ""
         if isinstance(result, dict):
             content = result.get("result", {}).get("content", [])
             if content and isinstance(content, list):
                 texts = [c.get("text", "") for c in content if isinstance(c, dict)]
-                result_str = " ".join(texts)[:500]
+                result_str = _truncate_words(" ".join(texts), 500)
 
         obs_text = f"Tool '{tool_name}' called"
         if arg_str and arg_str != "{}":
