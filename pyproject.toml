@@ -1,6 +1,6 @@
 [project]
 name = "loom-learn"
-version = "0.3.0"
+version = "0.3.1"
 description = "The memory layer for AI agents — shared learning across your entire organization. Observe, teach, reflect, auto-capture, auto-recall, onboard, succession, coaching amplification, per-observation RBAC, auditable timeline, and more."
 requires-python = ">=3.10"
 dependencies = [
