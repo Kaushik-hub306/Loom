@@ -172,6 +172,7 @@ loom cloud setup       # Provision Supabase database for team
 | Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) |
 | Claude Code | `~/.claude/settings.json` or `.claude/settings.json` |
 | Cursor | `~/.cursor/mcp.json` |
+| Codex CLI | `~/.codex/config.toml` or `~/.codex/config.json` |
 
 ---
 
