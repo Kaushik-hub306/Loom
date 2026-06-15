@@ -12,13 +12,35 @@
 
 ## Quick Start
 
+### Claude Desktop
+
 ```bash
 pip install loom-learn    # one command
 loom init                 # prints config → paste into Claude Desktop
 # restart Claude Desktop  # done
 ```
 
-Loom works for free with keyword extraction. To use an LLM for smarter extraction, add your API key to the `env` block that `loom init` prints:
+### Claude Code (CLI)
+
+Add to `~/.claude/settings.json` or your project's `.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "loom": {
+      "command": "python3",
+      "args": ["-m", "loom.mcp"],
+      "env": {
+        "LOOM_PROJECT_ROOT": "/path/to/your/project"
+      }
+    }
+  }
+}
+```
+
+Then restart Claude Code. That's it — Loom auto-injects context on your first tool call.
+
+Loom works for free with keyword extraction. To use an LLM for smarter extraction, add your API key to the `env` block:
 
 ```json
 "env": {
@@ -142,6 +164,14 @@ loom doctor            # Health check — Python, Loom, storage, LLM, MCP
 loom doctor --preflight # Validate MCP config before restart
 loom cloud setup       # Provision Supabase database for team
 ```
+
+### Config locations
+
+| Client | Config file |
+|--------|-----------|
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) |
+| Claude Code | `~/.claude/settings.json` or `.claude/settings.json` |
+| Cursor | `~/.cursor/mcp.json` |
 
 ---
 
