@@ -12,6 +12,7 @@ from loom.security.private_mode import should_skip_write, record_private_outcome
 from loom.security.integrity import verify_store_integrity, compute_and_store
 from loom.security.audit import log, AuditAction, verify_audit_invariants
 from loom.security.access import TokenScope, generate_token, verify_token, check_access
+from loom.mcp.server import create_loom_server
 
 
 # ── Redactor ──────────────────────────────────────────────────────────
@@ -187,10 +188,12 @@ def test_admin_access_includes_write(tmp_path):
 
 # ── Gitignore ─────────────────────────────────────────────────────────
 
-def test_gitignore_contains_expected_entries():
-    """Test 12: .loom/.gitignore contains tokens.json, integrity.json, audit.jsonl."""
-    gitignore = Path(__file__).parent.parent.parent.parent / ".loom" / ".gitignore"
-    assert gitignore.exists(), "Missing .loom/.gitignore"
+def test_gitignore_contains_expected_entries(tmp_path):
+    """Test 12: bootstrap creates .loom/.gitignore with tokens.json, integrity.json, audit.jsonl."""
+    srv = create_loom_server(tmp_path)
+    srv._bootstrap()
+    gitignore = tmp_path / ".loom" / ".gitignore"
+    assert gitignore.exists(), "Missing .loom/.gitignore after bootstrap"
     contents = gitignore.read_text()
     assert "tokens.json" in contents
     assert "integrity.json" in contents
