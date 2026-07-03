@@ -8,7 +8,6 @@ import yaml
 
 from loom.engine.domain_extractor import DomainConfig, DomainExtractor
 
-
 # ── DomainConfig ────────────────────────────────────────────────────
 
 

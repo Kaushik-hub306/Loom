@@ -2,17 +2,13 @@
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
-import pytest
-
-from loom.security.redactor import redact_text, redact_feedback
-from loom.security.private_mode import should_skip_write, record_private_outcome
-from loom.security.integrity import verify_store_integrity, compute_and_store
-from loom.security.audit import log, AuditAction, verify_audit_invariants
-from loom.security.access import TokenScope, generate_token, verify_token, check_access
-
+from loom.security.access import TokenScope, check_access, generate_token, verify_token
+from loom.security.audit import AuditAction, log, verify_audit_invariants
+from loom.security.integrity import compute_and_store, verify_store_integrity
+from loom.security.private_mode import record_private_outcome, should_skip_write
+from loom.security.redactor import redact_feedback, redact_text
 
 # ── Redactor ──────────────────────────────────────────────────────────
 
@@ -187,11 +183,22 @@ def test_admin_access_includes_write(tmp_path):
 
 # ── Gitignore ─────────────────────────────────────────────────────────
 
-def test_gitignore_contains_expected_entries():
-    """Test 12: .loom/.gitignore contains tokens.json, integrity.json, audit.jsonl."""
-    gitignore = Path(__file__).parent.parent.parent.parent / ".loom" / ".gitignore"
-    assert gitignore.exists(), "Missing .loom/.gitignore"
+def test_gitignore_contains_expected_entries(tmp_path):
+    """Test 12: the bootstrapped .loom/.gitignore protects sensitive files.
+
+    Hermetic: bootstraps a fresh server in tmp_path instead of depending
+    on a .loom/ directory happening to exist at the repo root.
+    """
+    from loom.mcp.server import create_loom_server
+
+    server = create_loom_server(tmp_path)
+    server._bootstrap()
+
+    gitignore = tmp_path / ".loom" / ".gitignore"
+    assert gitignore.exists(), "Bootstrap did not create .loom/.gitignore"
     contents = gitignore.read_text()
     assert "tokens.json" in contents
     assert "integrity.json" in contents
     assert "audit.jsonl" in contents
+    assert "*.lock" in contents
+    assert "*.corrupt-*" in contents

@@ -1,8 +1,8 @@
 """Tests for LLMExtractor — provider-agnostic extraction, availability, fallback."""
 
 from loom.engine.llm_extractor import LLMExtractor
-from loom.llm.base import ExtractedRule
 from loom.llm.anthropic import AnthropicProvider
+from loom.llm.base import ExtractedRule
 from loom.llm.deepseek import DeepSeekProvider
 
 
@@ -47,7 +47,7 @@ def test_extractor_default_model():
 
 def test_extractor_provider_model():
     provider = AnthropicProvider(api_key="sk-ant-fake")
-    assert provider.default_model == "claude-sonnet-4-6"
+    assert provider.default_model == "claude-sonnet-5"
     provider2 = DeepSeekProvider(api_key="sk-ds-fake")
     assert provider2.default_model == "deepseek-chat"
 

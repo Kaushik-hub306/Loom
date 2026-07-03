@@ -7,7 +7,6 @@ import pytest
 
 from loom.engine.rule_store import Rule, RuleStore
 
-
 # ── Rule dataclass ──────────────────────────────────────────────────
 
 
