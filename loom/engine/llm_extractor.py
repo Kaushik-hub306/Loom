@@ -5,9 +5,7 @@ Supports Anthropic, DeepSeek, and Gemini via the provider abstraction in
 keyword-based extraction via ``DomainExtractor`` — the zero-cost default.
 """
 
-import os
 import sys
-from pathlib import Path
 from typing import Any
 
 from loom.llm.base import BaseLLMProvider, ExtractedRule
@@ -27,8 +25,6 @@ class LLMExtractor:
         Maximum characters of input text sent to the LLM.
     """
 
-    DEFAULT_MODEL = "claude-sonnet-4-6"
-
     def __init__(
         self,
         provider: BaseLLMProvider | None = None,
@@ -41,24 +37,7 @@ class LLMExtractor:
     def provider(self) -> BaseLLMProvider | None:
         """The active provider (lazy-loaded from env vars if not injected)."""
         if self._provider is None:
-            try:
-                self._provider = get_provider()
-            except ImportError as e:
-                provider_name = os.environ.get("LOOM_LLM_PROVIDER", "anthropic")
-                pkgs = {
-                    "anthropic": "pip install loom-agent[llm]",
-                    "deepseek": "pip install loom-agent[deepseek]",
-                    "gemini": "pip install loom-agent[gemini]",
-                }
-                pkg_cmd = pkgs.get(provider_name, "pip install loom-agent[llm]")
-                import sys
-                print(
-                    f"[loom] LLM provider '{provider_name}' requires an SDK "
-                    f"that is not installed. Run: {pkg_cmd}. "
-                    f"Falling back to keyword extraction (free, no API key needed).",
-                    file=sys.stderr,
-                )
-                self._provider = None
+            self._provider = get_provider()
         return self._provider
 
     @property
@@ -81,8 +60,9 @@ class LLMExtractor:
     ) -> list[ExtractedRule]:
         """Extract convention rules from *text* using the configured LLM provider.
 
-        Returns an empty list when no provider is available or no rules
-        are found — callers should fall back to keyword-based extraction.
+        Returns an empty list when no provider is available, no rules are
+        found, or the provider fails for any reason — callers can always
+        safely fall back to keyword-based extraction. Never raises.
         """
         p = self.provider
         if p is None:
@@ -94,10 +74,20 @@ class LLMExtractor:
             description = getattr(domain_config, "description", description)
             rule_types = getattr(domain_config, "rule_types", None)
 
-        return await p.extract(
-            text=text,
-            domain=domain,
-            domain_description=description,
-            rule_types=rule_types,
-            max_input_chars=self.max_input_chars,
-        )
+        try:
+            return await p.extract(
+                text=text,
+                domain=domain,
+                domain_description=description,
+                rule_types=rule_types,
+                max_input_chars=self.max_input_chars,
+            )
+        except Exception as e:
+            # Providers already guard their own API calls, but one crashed
+            # extraction must never take the whole learning pipeline down.
+            print(
+                f"[loom] LLM extraction error ({type(e).__name__}: {e}); "
+                f"falling back to keyword extraction.",
+                file=sys.stderr,
+            )
+            return []

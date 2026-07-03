@@ -1,7 +1,16 @@
 """Abstract base class for LLM providers."""
 
+from __future__ import annotations
+
+import json
+import re
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+
+#: Default cap on a single extraction API call, in seconds. One slow or
+#: hanging provider call must never stall the MCP server indefinitely.
+DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass
@@ -21,9 +30,16 @@ class BaseLLMProvider(ABC):
     and exposes a single async ``extract()`` method with identical semantics.
     """
 
-    def __init__(self, api_key: str, model: str | None = None, **kwargs):
+    def __init__(
+        self,
+        api_key: str,
+        model: str | None = None,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        **kwargs,
+    ):
         self.api_key = api_key
         self.model = model or self.default_model
+        self.timeout = timeout
         self.extra_config = kwargs
 
     @property
@@ -61,9 +77,25 @@ class BaseLLMProvider(ABC):
         """
         ...
 
-    def _build_prompt(self, text: str, domain: str,
-                      domain_description: str,
-                      rule_types: list[str] | None) -> str:
+    def _log_failure(self, error: BaseException) -> None:
+        """Report an extraction failure to stderr (never stdout — this may
+        run inside an MCP stdio server) so failures are diagnosable instead
+        of perfectly silent."""
+        print(
+            f"[loom] {self.provider_name} extraction failed "
+            f"({type(error).__name__}: {error}). Falling back to keyword "
+            f"extraction for this batch.",
+            file=sys.stderr,
+        )
+
+    def _build_prompt(
+        self,
+        text: str,
+        domain: str,
+        domain_description: str,
+        rule_types: list[str] | None,
+        max_input_chars: int = 8000,
+    ) -> str:
         """Build the extraction prompt — shared across providers."""
         types_str = ", ".join(rule_types) if rule_types else "any (free-form)"
         desc = domain_description or f"{domain} conventions"
@@ -96,6 +128,65 @@ a general rule.
    - 9-10: explicitly stated AND reinforced by examples or outcomes
 7. If no conventions can be extracted, return an empty list.
 
+## Output format
+
+Respond with ONLY a JSON object (no prose, no markdown fences) shaped exactly:
+{{"rules": [{{"rule_type": "string", "rule": "string", "example": "string", "confidence": 1}}]}}
+
 ## Input text
 
 {text[:max_input_chars]}"""
+
+    @staticmethod
+    def _parse_rules_json(raw: str) -> list[ExtractedRule]:
+        """Parse a model response into ExtractedRule objects.
+
+        Tolerates markdown fences and surrounding prose: falls back to the
+        first ``{...}`` block found in the response. Returns ``[]`` on any
+        parse failure — never raises.
+        """
+        if not raw:
+            return []
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            # Strip an opening fence (with optional language tag) and a
+            # closing fence if present.
+            cleaned = re.sub(r"^```[a-zA-Z0-9]*\s*", "", cleaned)
+            if cleaned.endswith("```"):
+                cleaned = cleaned[: -3]
+            cleaned = cleaned.strip()
+
+        result = None
+        try:
+            result = json.loads(cleaned)
+        except json.JSONDecodeError:
+            # Last resort: find the outermost JSON object in the text.
+            match = re.search(r"\{[\s\S]*\}", cleaned)
+            if match:
+                try:
+                    result = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    return []
+        if not isinstance(result, dict):
+            return []
+        rules = result.get("rules")
+        if not isinstance(rules, list):
+            return []
+
+        extracted: list[ExtractedRule] = []
+        for r in rules:
+            if not isinstance(r, dict) or not r.get("rule"):
+                continue
+            try:
+                confidence = int(r.get("confidence", 5))
+            except (TypeError, ValueError):
+                confidence = 5
+            extracted.append(
+                ExtractedRule(
+                    rule_type=str(r.get("rule_type", "convention") or "convention"),
+                    rule=str(r["rule"]),
+                    example=str(r.get("example", "") or ""),
+                    confidence=min(10, max(1, confidence)),
+                )
+            )
+        return extracted
