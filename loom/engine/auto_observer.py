@@ -17,7 +17,6 @@ from .domain_extractor import DomainExtractor
 from .llm_extractor import ExtractedRule, LLMExtractor
 from .rule_store import RuleStore
 
-
 # ── Configuration ───────────────────────────────────────────────────────────
 
 
@@ -416,7 +415,7 @@ class AutoObserver:
                       file=sys.stderr, flush=True)
                 return extracted
             import sys
-            print(f"[Loom] LLM extraction returned empty — check API key and network",
+            print("[Loom] LLM extraction returned empty — check API key and network",
                   file=sys.stderr, flush=True)
 
         # Fall back to keyword-based extraction.
@@ -656,9 +655,8 @@ class AutoObserver:
             return None
 
         return self.observe(
-            context="tool_call",
+            context=f"tool_call:{tool_name}",
             observation=observation_text,
-            source=tool_name,
         )
 
     @property

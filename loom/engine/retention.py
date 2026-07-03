@@ -1,10 +1,11 @@
 """RetentionManager — tiered retention policies for organizational knowledge."""
 
-import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+
+from loom.timeutil import parse_iso_utc
 
 
 class RetentionPolicy(Enum):
@@ -175,34 +176,40 @@ class RetentionManager:
     # ── retention storage ───────────────────────────────────────────
 
     def _load_retention(self):
-        try:
-            if self._retention_path.exists():
-                data = json.loads(self._retention_path.read_text())
-                for entry_dict in data.get("policies", []):
-                    entry = RetentionEntry.from_dict(entry_dict)
-                    self.policies[entry.rule_id] = entry
-        except (json.JSONDecodeError, KeyError):
-            self.policies = {}
+        from loom.storage.jsonio import load_entries, load_json_dict
+
+        data = load_json_dict(self._retention_path)
+        self.policies = {}
+        for entry in load_entries(
+            data.get("policies"), RetentionEntry.from_dict,
+            source_name=self._retention_path.name,
+        ):
+            self.policies[entry.rule_id] = entry
 
     def _save_retention(self):
+        from loom.storage.jsonio import atomic_write_json
+
         data = {"policies": [e.to_dict() for e in self.policies.values()]}
-        self._retention_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        atomic_write_json(self._retention_path, data)
 
     # ── archive storage ─────────────────────────────────────────────
 
     def _load_archive(self):
-        try:
-            if self._archive_path.exists():
-                data = json.loads(self._archive_path.read_text())
-                for rule_dict in data.get("archived", []):
-                    rule = ArchivedRule.from_dict(rule_dict)
-                    self.archived[rule.id] = rule
-        except (json.JSONDecodeError, KeyError):
-            self.archived = {}
+        from loom.storage.jsonio import load_entries, load_json_dict
+
+        data = load_json_dict(self._archive_path)
+        self.archived = {}
+        for rule in load_entries(
+            data.get("archived"), ArchivedRule.from_dict,
+            source_name=self._archive_path.name,
+        ):
+            self.archived[rule.id] = rule
 
     def _save_archive(self):
+        from loom.storage.jsonio import atomic_write_json
+
         data = {"archived": [r.to_dict() for r in self.archived.values()]}
-        self._archive_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        atomic_write_json(self._archive_path, data)
 
     # ── policy management ───────────────────────────────────────────
 
@@ -301,9 +308,8 @@ class RetentionManager:
             if not rule.updated_at:
                 continue
 
-            try:
-                updated = datetime.fromisoformat(rule.updated_at)
-            except ValueError:
+            updated = parse_iso_utc(rule.updated_at)
+            if updated is None:
                 continue
 
             age_days = (now - updated).days
@@ -353,9 +359,8 @@ class RetentionManager:
             if not rule.updated_at:
                 continue
 
-            try:
-                updated = datetime.fromisoformat(rule.updated_at)
-            except ValueError:
+            updated = parse_iso_utc(rule.updated_at)
+            if updated is None:
                 continue
 
             # When will the next decay hit?

@@ -12,7 +12,6 @@ from pathlib import Path
 
 from loom.engine.rule_store import RuleStore
 
-
 # ── Knowledge item categories ─────────────────────────────────────────
 
 CATEGORY_LABELS: dict[str, str] = {
@@ -151,11 +150,11 @@ class SuccessionManager:
                 continue
 
     def _save(self):
+        from loom.storage.jsonio import atomic_write_json
+
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         for member_id, session in self._sessions.items():
-            self._session_path(member_id).write_text(
-                json.dumps(session.to_dict(), indent=2)
-            )
+            atomic_write_json(self._session_path(member_id), session.to_dict())
 
     # ── session management ─────────────────────────────────────────
 

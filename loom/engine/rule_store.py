@@ -1,11 +1,19 @@
 """RuleStore — persistent, searchable store of learned conventions."""
 
-import json
+import hashlib
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from loom.storage.jsonio import atomic_write_json, load_entries, load_json_dict
+
+
+def _clamp_confidence(value: int) -> int:
+    try:
+        return max(1, min(10, int(value)))
+    except (TypeError, ValueError):
+        return 5
 
 
 @dataclass
@@ -45,47 +53,95 @@ class Rule:
     def from_dict(cls, d: dict) -> "Rule":
         # Backward compat: migrate old "source_urls" key to "sources"
         sources = d.get("sources", d.get("source_urls", []))
+        if not isinstance(sources, list):
+            sources = []
         return cls(
             id=d["id"],
             domain=d["domain"],
             rule_type=d["rule_type"],
             rule=d.get("rule", d.get("pattern", "")),
-            example=d.get("example", ""),
-            confidence=d.get("confidence", 5),
-            times_confirmed=d.get("times_confirmed", 0),
-            times_violated=d.get("times_violated", 0),
-            sources=sources,
-            source_type=d.get("source_type", ""),
-            created_at=d.get("created_at", ""),
-            updated_at=d.get("updated_at", ""),
+            example=d.get("example", "") or "",
+            confidence=_clamp_confidence(d.get("confidence", 5)),
+            times_confirmed=int(d.get("times_confirmed", 0) or 0),
+            times_violated=int(d.get("times_violated", 0) or 0),
+            sources=[str(s) for s in sources],
+            source_type=d.get("source_type", "") or "",
+            created_at=d.get("created_at", "") or "",
+            updated_at=d.get("updated_at", "") or "",
         )
 
 
+def _normalize_rule_text(text: str) -> str:
+    """Normalize rule text for equality comparison (dedup)."""
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
 class RuleStore:
-    """Persistent store of convention rules backed by a JSON file."""
+    """Persistent store of convention rules backed by a JSON file.
+
+    Storage safety:
+
+    * Loads skip individually malformed entries instead of discarding the
+      whole store, and corrupt files are quarantined — a bad load can
+      never lead to a save that wipes prior data.
+    * Saves are atomic (temp file + fsync + rename) under an advisory
+      file lock, so crashes and concurrent writers cannot corrupt the
+      store.
+    """
 
     def __init__(self, path: Path):
         self.path = Path(path)
         self.rules: dict[str, Rule] = {}
+        self._loaded_sig: tuple | None = None
         if self.path.exists():
             self._load()
 
     def _load(self):
+        data = load_json_dict(self.path)
+        self.rules = {}
+        for rule in load_entries(
+            data.get("rules"), Rule.from_dict, source_name=self.path.name
+        ):
+            self.rules[rule.id] = rule
+        self._loaded_sig = self._file_signature()
+
+    def _file_signature(self) -> tuple | None:
+        """Cheap change-detection signature (atomic writes change the inode)."""
         try:
-            data = json.loads(self.path.read_text())
-            for rule_dict in data.get("rules", []):
-                rule = Rule.from_dict(rule_dict)
-                self.rules[rule.id] = rule
-        except (json.JSONDecodeError, KeyError):
-            self.rules = {}
+            st = self.path.stat()
+            return (st.st_mtime_ns, st.st_ino, st.st_size)
+        except OSError:
+            return None
+
+    def reload_if_stale(self) -> bool:
+        """Re-read the file if it changed on disk since the last load.
+
+        Returns True when a reload happened. Lets a long-lived server
+        cache one RuleStore instance while staying consistent with
+        other writers (e.g. a second Loom process on the same project).
+        """
+        if self._file_signature() != self._loaded_sig:
+            if self.path.exists():
+                self._load()
+            else:
+                self.rules = {}
+                self._loaded_sig = None
+            return True
+        return False
 
     def _save(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         data = {"rules": [r.to_dict() for r in self.rules.values()]}
-        self.path.write_text(json.dumps(data, indent=2))
+        atomic_write_json(self.path, data)
+        self._loaded_sig = self._file_signature()
 
     def _make_id(self, domain: str, rule_type: str, rule_text: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "-", rule_text.lower().strip())[:60].strip("-")
+        if not slug:
+            # Rule text with no alphanumeric content — fall back to a hash
+            # so distinct rules can't collide on an empty slug.
+            slug = hashlib.sha1(
+                _normalize_rule_text(rule_text).encode("utf-8")
+            ).hexdigest()[:12]
         return f"{domain}::{rule_type}::{slug}"
 
     def _now(self) -> str:
@@ -116,8 +172,20 @@ class RuleStore:
         if source_url and source_url not in source_list:
             source_list.append(source_url)
 
-        if rule_id in self.rules:
-            existing = self.rules[rule_id]
+        existing = self.rules.get(rule_id)
+        if existing is not None and _normalize_rule_text(
+            existing.rule
+        ) != _normalize_rule_text(rule):
+            # Slug collision: two DIFFERENT rules truncated to the same
+            # slug. Disambiguate deterministically with a content hash so
+            # the new rule is stored instead of silently merged away.
+            digest = hashlib.sha1(
+                _normalize_rule_text(rule).encode("utf-8")
+            ).hexdigest()[:8]
+            rule_id = f"{rule_id}-{digest}"
+            existing = self.rules.get(rule_id)
+
+        if existing is not None:
             existing.confidence = min(10, existing.confidence + 1)
             existing.times_confirmed += 1
             existing.updated_at = now
@@ -135,7 +203,7 @@ class RuleStore:
             rule_type=rule_type,
             rule=rule,
             example=example,
-            confidence=confidence,
+            confidence=_clamp_confidence(confidence),
             times_confirmed=1,
             sources=source_list,
             source_type=source_type,
@@ -219,15 +287,17 @@ class RuleStore:
 
     def get_all_domain_stats(self) -> dict[str, dict]:
         stats: dict[str, dict] = {}
+        conf_sums: dict[str, int] = {}
         for rule in self.rules.values():
             if rule.domain not in stats:
                 stats[rule.domain] = {"total": 0, "by_type": {}, "avg_confidence": 0.0}
+                conf_sums[rule.domain] = 0
             s = stats[rule.domain]
             s["total"] += 1
             s["by_type"][rule.rule_type] = s["by_type"].get(rule.rule_type, 0) + 1
+            conf_sums[rule.domain] += rule.confidence
         for domain, s in stats.items():
-            domain_rules = [r for r in self.rules.values() if r.domain == domain]
-            s["avg_confidence"] = sum(r.confidence for r in domain_rules) / max(len(domain_rules), 1)
+            s["avg_confidence"] = conf_sums[domain] / max(s["total"], 1)
         return stats
 
     def get_domain_stats(self, domain: str | None = None) -> dict:

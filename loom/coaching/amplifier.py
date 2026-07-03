@@ -4,12 +4,10 @@ Glen's vision: "coaching amplification" — when a top performer explains WHY a
 rule matters, that context becomes reusable training for every other agent.
 """
 
-import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-
 
 # ── data types ────────────────────────────────────────────────────────────────
 
@@ -128,18 +126,21 @@ class CoachingAmplifier:
     # ── persistence ─────────────────────────────────────────────────────────
 
     def _load(self):
-        try:
-            data = json.loads(self._path.read_text())
-            for d in data.get("amplifications", []):
-                rule = AmplifiedRule.from_dict(d)
-                self._amplifications[rule.id] = rule
-        except (json.JSONDecodeError, KeyError):
-            self._amplifications = {}
+        from loom.storage.jsonio import load_entries, load_json_dict
+
+        data = load_json_dict(self._path)
+        self._amplifications = {}
+        for rule in load_entries(
+            data.get("amplifications"), AmplifiedRule.from_dict,
+            source_name=self._path.name,
+        ):
+            self._amplifications[rule.id] = rule
 
     def _save(self):
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        from loom.storage.jsonio import atomic_write_json
+
         data = {"amplifications": [r.to_dict() for r in self._amplifications.values()]}
-        self._path.write_text(json.dumps(data, indent=2))
+        atomic_write_json(self._path, data)
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()

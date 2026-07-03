@@ -1,8 +1,10 @@
 """DecayManager — manages rule confidence decay over time."""
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
-from .rule_store import RuleStore, Rule
+from loom.timeutil import parse_iso_utc
+
+from .rule_store import Rule, RuleStore
 
 
 class DecayManager:
@@ -26,9 +28,8 @@ class DecayManager:
             if not rule.updated_at:
                 continue
 
-            try:
-                updated = datetime.fromisoformat(rule.updated_at)
-            except ValueError:
+            updated = parse_iso_utc(rule.updated_at)
+            if updated is None:
                 continue
 
             if updated < cutoff and rule.confidence > self.MIN_CONFIDENCE:
@@ -60,9 +61,8 @@ class DecayManager:
         for r in rules:
             if not r.updated_at:
                 continue
-            try:
-                updated = datetime.fromisoformat(r.updated_at)
-            except ValueError:
+            updated = parse_iso_utc(r.updated_at)
+            if updated is None:
                 continue
             if (now - updated).days >= self.decay_days:
                 decaying += 1

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from .rule_store import Rule, RuleStore
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    pass
 
 
 # ── Smart domain mapping ────────────────────────────────────────────────────
@@ -353,7 +353,7 @@ class ContextLoader:
         stats = self.store.get_all_domain_stats()
         overview: dict[str, list[dict]] = {}
 
-        for domain, domain_stats in sorted(stats.items(), key=lambda x: -x[1]["total"]):
+        for domain, _domain_stats in sorted(stats.items(), key=lambda x: -x[1]["total"]):
             rules = self.store.get_rules_by_domain(domain, min_confidence=1)
             rules.sort(key=lambda r: (r.confidence, r.times_confirmed), reverse=True)
             overview[domain] = []
@@ -547,10 +547,10 @@ class ContextLoader:
             rule.domain,
             rule.example,
         ]
-        for field in fields:
-            if not field:
+        for field_text in fields:
+            if not field_text:
                 continue
-            field_lower = field.lower()
+            field_lower = field_text.lower()
             # Count word-level overlaps.
             words = re.findall(r"\w+", field_lower)
             for w in words:

@@ -11,21 +11,17 @@ exception traces.  All errors are wrapped to strip sensitive information.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
-from enum import Enum
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from loom.engine.org_store import OrgRule
+from loom.engine.retention import RetentionEntry, RetentionPolicy
 
 # ── Re-export the shared data classes (so callers don't need two imports) ──
-
 from loom.engine.rule_store import Rule
 from loom.engine.timeline import TimelineEntry
-from loom.engine.org_store import OrgRule
-from loom.engine.retention import RetentionEntry, RetentionPolicy, ArchivedRule
-from loom.security.rbac import ObservationPermissions, ClearanceLevel
-
+from loom.security.rbac import ClearanceLevel, ObservationPermissions
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Helpers
@@ -364,6 +360,51 @@ class PostgresRBAC:
             owner=owner,
             set_at=row.get("set_at", _now()),
         )
+
+    def check_access(
+        self,
+        rule_id: str,
+        agent_id: str,
+        agent_role: str,
+        agent_teams: list[str] | None = None,
+    ) -> bool:
+        """Return True if the agent is cleared to see *rule_id*.
+
+        Mirrors RBACEngine.check_access semantics: rules without a
+        permission record are treated as PUBLIC (default-open).
+        """
+        from loom.security.rbac import RBACEngine
+
+        row = self._pg.get_permission(rule_id)
+        if not row:
+            return True
+
+        def _as_list(value) -> list:
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, list) else []
+                except json.JSONDecodeError:
+                    return []
+            return []
+
+        clearance_name = str(row.get("clearance", "internal")).upper()
+        try:
+            clearance = ClearanceLevel[clearance_name]
+        except KeyError:
+            clearance = ClearanceLevel.INTERNAL
+
+        perm = ObservationPermissions(
+            rule_id=rule_id,
+            clearance=clearance,
+            allowed_roles=_as_list(row.get("allowed_roles")),
+            allowed_agents=_as_list(row.get("allowed_agents")),
+            allowed_teams=_as_list(row.get("allowed_teams")),
+            owner=row.get("owner", "") or "",
+        )
+        return RBACEngine._evaluate(perm, agent_id, agent_role, agent_teams or [])
 
 
 # ═══════════════════════════════════════════════════════════════════════════

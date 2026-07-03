@@ -13,14 +13,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .rule_store import Rule
-
 
 # ── platform-aware file locking ────────────────────────────────────────
 
@@ -111,7 +109,7 @@ class OrgRule:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "OrgRule":
+    def from_dict(cls, d: dict[str, Any]) -> OrgRule:
         sources = d.get("sources", d.get("source_urls", []))
         return cls(
             id=d["id"],
@@ -189,29 +187,35 @@ class OrgStore:
     # ── persistence ────────────────────────────────────────────────
 
     def _load(self):
-        """Load rules from the backing JSON file."""
-        try:
-            data = json.loads(self.path.read_text())
-            for rule_dict in data.get("rules", []):
-                rule = OrgRule.from_dict(rule_dict)
-                self.rules[rule.id] = rule
-        except (json.JSONDecodeError, KeyError):
-            self.rules = {}
+        """Load rules from the backing JSON file.
+
+        Malformed entries are skipped (never wiping the whole store) and
+        corrupt files are quarantined instead of silently discarded.
+        """
+        from loom.storage.jsonio import load_entries, load_json_dict
+
+        data = load_json_dict(self.path)
+        self.rules = {}
+        for rule in load_entries(
+            data.get("rules"), OrgRule.from_dict, source_name=self.path.name
+        ):
+            self.rules[rule.id] = rule
 
     def _save(self):
-        """Persist rules to the backing JSON file under a file lock."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        """Persist rules atomically under an advisory file lock."""
+        from loom.storage.jsonio import atomic_write_json
+
         data = {"rules": [r.to_dict() for r in self.rules.values()]}
-        payload = json.dumps(data, indent=2)
-        with open(self.path, "w") as f:
-            _lock_file(f)
-            try:
-                f.write(payload)
-            finally:
-                _unlock_file(f)
+        atomic_write_json(self.path, data)
 
     def _make_id(self, domain: str, rule_type: str, rule_text: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "-", rule_text.lower().strip())[:60].strip("-")
+        if not slug:
+            import hashlib
+
+            slug = hashlib.sha1(
+                re.sub(r"\s+", " ", rule_text.strip().lower()).encode("utf-8")
+            ).hexdigest()[:12]
         return f"{domain}::{rule_type}::{slug}"
 
     def _now(self) -> str:
@@ -750,7 +754,7 @@ class OrgStore:
         stats["total_projects"] = len(projects_seen)
 
         # Compute per-project avg confidence
-        for proj_key, proj_stats in stats["by_project"].items():
+        for _proj_key, proj_stats in stats["by_project"].items():
             proj_stats["avg_confidence"] = (
                 proj_stats["confidence_sum"] / max(proj_stats["count"], 1)
             )

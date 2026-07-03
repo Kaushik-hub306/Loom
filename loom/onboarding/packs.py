@@ -10,19 +10,24 @@ from pathlib import Path
 
 from loom.engine.rule_store import RuleStore
 
-
 # ── Role → domain mapping ─────────────────────────────────────────────
 
+# THE single source of truth for role → (domains, min_confidence).
+# loom.mcp.server derives its role map from this — add new roles here only.
 ROLE_DOMAIN_MAP: dict[str, tuple[list[str], int]] = {
     "backend-engineer": (["coding", "architecture", "testing", "security", "process"], 5),
     "frontend-dev": (["coding", "style", "testing", "documentation"], 5),
     "devops": (["process", "security", "architecture"], 5),
     "data-scientist": (["coding", "testing", "documentation"], 4),
+    "data-engineer": (["coding", "architecture", "process", "security"], 5),
     "support-agent": (["general", "process", "documentation"], 4),
+    "sales-agent": (["general", "process"], 4),
     "tech-lead": (["architecture", "process", "security", "coding"], 6),
+    "engineering-manager": (["process", "architecture", "general"], 5),
     "new-grad": (["coding", "style", "testing", "process", "general"], 3),
     "embedded-engineer": (["coding", "architecture", "testing", "security"], 5),
     "mobile-dev": (["coding", "style", "testing", "security"], 5),
+    "ml-engineer": (["coding", "testing", "architecture", "process"], 5),
     "fullstack-dev": (["coding", "architecture", "style", "testing", "documentation"], 5),
     "qa-engineer": (["testing", "process", "documentation"], 4),
     "security-engineer": (["security", "architecture", "coding", "process"], 6),
@@ -31,6 +36,7 @@ ROLE_DOMAIN_MAP: dict[str, tuple[list[str], int]] = {
     "designer": (["style", "documentation", "general"], 4),
     "architect": (["architecture", "coding", "security", "process"], 7),
     "team-lead": (["process", "architecture", "general", "coding"], 6),
+    "tech-writer": (["documentation", "style", "general"], 4),
     "docs-writer": (["documentation", "style", "general", "process"], 4),
 }
 
@@ -105,11 +111,11 @@ class OnboardingManager:
                 continue
 
     def _save(self):
+        from loom.storage.jsonio import atomic_write_json
+
         self._packs_dir.mkdir(parents=True, exist_ok=True)
         for role, pack in self._packs.items():
-            self._pack_path(role).write_text(
-                json.dumps(pack.to_dict(), indent=2)
-            )
+            atomic_write_json(self._pack_path(role), pack.to_dict())
 
     def _resolve_role(self, role: str) -> tuple[str, list[str], int]:
         """Return (role, domains, min_confidence) for a known role label.

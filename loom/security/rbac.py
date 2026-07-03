@@ -6,14 +6,11 @@ in access.py.  Token scope gates *operations* (read/write/admin); RBAC gates
 is authorised for.
 """
 
-import json
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum
 from pathlib import Path
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -103,29 +100,37 @@ class RBACEngine:
 
     def _load(self) -> None:
         """Load persisted permissions and policies from disk."""
-        if not self._path.exists():
-            return
-        try:
-            raw = json.loads(self._path.read_text())
-        except (json.JSONDecodeError, OSError):
+        from loom.storage.jsonio import load_json_dict
+
+        raw = load_json_dict(self._path)
+        if not raw:
             return
 
         perms_raw = raw.get("permissions", {})
-        for rule_id, perm_dict in perms_raw.items():
-            self._permissions[rule_id] = ObservationPermissions.from_dict(perm_dict)
+        if isinstance(perms_raw, dict):
+            for rule_id, perm_dict in perms_raw.items():
+                try:
+                    self._permissions[rule_id] = ObservationPermissions.from_dict(
+                        perm_dict
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
 
-        self._policies = raw.get("policies", [])
-        self._audit_entries = raw.get("audit", [])
+        policies = raw.get("policies", [])
+        self._policies = policies if isinstance(policies, list) else []
+        audit = raw.get("audit", [])
+        self._audit_entries = audit if isinstance(audit, list) else []
 
     def _save(self) -> None:
-        """Persist current permissions, policies, and audit log to disk."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        """Persist current permissions, policies, and audit log atomically."""
+        from loom.storage.jsonio import atomic_write_json
+
         raw = {
             "permissions": {rid: p.to_dict() for rid, p in self._permissions.items()},
             "policies": self._policies,
             "audit": self._audit_entries,
         }
-        self._path.write_text(json.dumps(raw, indent=2))
+        atomic_write_json(self._path, raw)
 
     # ------------------------------------------------------------------
     # Core access logic

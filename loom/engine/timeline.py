@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -77,9 +77,14 @@ class Timeline:
 
     def _parse_ts(self, ts: str) -> datetime | None:
         try:
-            return datetime.fromisoformat(ts)
+            dt = datetime.fromisoformat(ts)
         except (ValueError, TypeError):
             return None
+        # Normalize naive timestamps (e.g. hand-edited or imported data)
+        # to UTC so they compare safely against aware datetimes.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
 
     # ── core: record ────────────────────────────────────────────────
 
@@ -162,7 +167,10 @@ class Timeline:
         """Query the timeline with optional filters.
 
         All parameters are optional — omit a filter to include everything.
-        Results are returned in chronological order (oldest first).
+        Results are returned in chronological order (oldest first). When
+        ``limit`` is set, the MOST RECENT matching entries are kept (still
+        returned oldest-first), so callers asking for "the last N things"
+        actually get recent activity rather than ancient history.
         """
         from_dt = self._parse_ts(date_from) if date_from else None
         to_dt = self._parse_ts(date_to) if date_to else None
@@ -187,7 +195,7 @@ class Timeline:
             results.append(entry)
 
         if limit:
-            results = results[:limit]
+            results = results[-limit:]
         return results
 
     def get_decision_trail(self, rule_id: str) -> list[TimelineEntry]:
@@ -248,7 +256,7 @@ class Timeline:
             # When there are no entries, show the current date range anyway
             now = datetime.now(timezone.utc)
             return (
-                f"## Timeline: {now.strftime('%B %-d')}, {now.year}\n\n"
+                f"## Timeline: {now.strftime('%B')} {now.day}, {now.year}\n\n"
                 f"_No entries for this period._"
             )
 
@@ -267,22 +275,22 @@ class Timeline:
         last_dt = self._parse_ts(last + "T00:00:00+00:00")
 
         if len(sorted_dates) == 1 and first_dt:
-            header_date = first_dt.strftime("%B %-d, %Y")
+            header_date = f"{first_dt.strftime('%B')} {first_dt.day}, {first_dt.year}"
         elif first_dt and last_dt:
             if first_dt.year == last_dt.year:
                 if first_dt.month == last_dt.month:
                     header_date = (
-                        f"{first_dt.strftime('%B %-d')}–{last_dt.day}, {first_dt.year}"
+                        f"{first_dt.strftime('%B')} {first_dt.day}–{last_dt.day}, {first_dt.year}"
                     )
                 else:
                     header_date = (
-                        f"{first_dt.strftime('%B %-d')} – "
-                        f"{last_dt.strftime('%B %-d')}, {first_dt.year}"
+                        f"{first_dt.strftime('%B')} {first_dt.day} – "
+                        f"{last_dt.strftime('%B')} {last_dt.day}, {first_dt.year}"
                     )
             else:
                 header_date = (
-                    f"{first_dt.strftime('%B %-d, %Y')} – "
-                    f"{last_dt.strftime('%B %-d, %Y')}"
+                    f"{first_dt.strftime('%B')} {first_dt.day}, {first_dt.year} – "
+                    f"{last_dt.strftime('%B')} {last_dt.day}, {last_dt.year}"
                 )
         else:
             header_date = f"{first} to {last}"
@@ -292,7 +300,7 @@ class Timeline:
         for date_key in sorted_dates:
             dt = self._parse_ts(date_key + "T00:00:00+00:00")
             if dt:
-                day_label = dt.strftime("%B %-d")
+                day_label = f"{dt.strftime('%B')} {dt.day}"
             else:
                 day_label = date_key
 
@@ -333,8 +341,11 @@ class Timeline:
         else:
             raise ValueError(f"Unknown period '{period}'. Use daily, weekly, or monthly.")
 
-        entries = [e for e in self._iter_entries()
-                   if self._parse_ts(e.timestamp) and self._parse_ts(e.timestamp) >= since]
+        entries = []
+        for e in self._iter_entries():
+            ts = self._parse_ts(e.timestamp)
+            if ts is not None and ts >= since:
+                entries.append(e)
 
         action_counts: dict[str, int] = {}
         domain_counts: dict[str, int] = {}

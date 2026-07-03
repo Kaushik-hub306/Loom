@@ -17,8 +17,8 @@ def _now() -> str:
 def _row_to_dict(row: tuple, cursor) -> dict:
     """Convert a database row to a dict using column names."""
     cols = [desc[0] for desc in cursor.description]
-    result = {}
-    for col, val in zip(cols, row):
+    result: dict[str, object] = {}
+    for col, val in zip(cols, row, strict=False):
         if isinstance(val, str):
             result[col] = val
         elif isinstance(val, (int, float)):
@@ -46,7 +46,6 @@ class PostgresStore(StorageBackend):
     # ── Lifecycle ──────────────────────────────────────────────────
 
     def initialize(self):
-        import psycopg2
         from psycopg2.pool import ThreadedConnectionPool
 
         dsn = self.config.database_url

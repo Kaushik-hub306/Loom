@@ -5,7 +5,6 @@ from pathlib import Path
 
 import yaml
 
-
 # Fallback patterns used when a domain config has no patterns block.
 # Each key is a rule_type, each value is a list of trigger keywords.
 _FALLBACK_PATTERNS: dict[str, list[str]] = {
