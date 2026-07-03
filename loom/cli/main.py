@@ -2,8 +2,8 @@
 
 import json
 import os
-import sys
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -116,10 +116,10 @@ def cmd_doctor(args=None):
 
     checks = []
 
-    # 1. Python version
+    # 1. Python version — keep in sync with requires-python in pyproject.toml
     py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    py_ok = sys.version_info >= (3, 11)
-    checks.append(("Python 3.11+", py_ok, f"Python {py_version}"))
+    py_ok = sys.version_info >= (3, 10)
+    checks.append(("Python 3.10+", py_ok, f"Python {py_version}"))
 
     # 2. Loom importable
     try:
@@ -131,13 +131,27 @@ def cmd_doctor(args=None):
         loom_msg = "Loom not installed — run: pip install -e ."
     checks.append(("Loom installed", loom_ok, loom_msg))
 
-    # 3. Project root exists and is writable
+    # 3. Project root exists (or can be created) and is writable
     project_root = Path(os.environ.get("LOOM_PROJECT_ROOT", os.getcwd()))
     root_exists = project_root.exists()
-    root_writable = os.access(project_root, os.W_OK) if root_exists else False
-    checks.append(("Project directory", root_exists, str(project_root)))
-    checks.append(("Directory writable", root_writable,
-                   "writable" if root_writable else f"not writable: {project_root}"))
+    if root_exists:
+        root_writable = os.access(project_root, os.W_OK)
+        checks.append(("Project directory", True, str(project_root)))
+        checks.append(("Directory writable", root_writable,
+                       "writable" if root_writable else f"not writable: {project_root}"))
+    else:
+        # The MCP server auto-creates the project root at startup, so a
+        # missing directory is only a failure if it CANNOT be created.
+        nearest = project_root
+        while not nearest.exists() and nearest != nearest.parent:
+            nearest = nearest.parent
+        creatable = os.access(nearest, os.W_OK)
+        checks.append(("Project directory", creatable,
+                       f"{project_root} (will be created at startup)" if creatable
+                       else f"cannot create {project_root}: {nearest} is not writable"))
+        checks.append(("Directory writable", creatable,
+                       "will be created writable" if creatable
+                       else f"not writable: {nearest}"))
 
     # 4. .loom/ directory
     loom_dir = project_root / ".loom"
@@ -179,38 +193,42 @@ def cmd_doctor(args=None):
     from loom.llm.factory import get_provider
     provider = get_provider()
     if provider:
-        sdk_ok = False
-        if provider.provider_name == "anthropic":
-            try:
-                import anthropic
-                sdk_ok = True
-            except ImportError:
-                pass
-        elif provider.provider_name == "deepseek":
-            try:
-                import openai
-                sdk_ok = True
-            except ImportError:
-                pass
-        elif provider.provider_name == "gemini":
-            try:
-                import google.generativeai
-                sdk_ok = True
-            except ImportError:
-                pass
+        import importlib.util
 
-        sdk_msg = f"{provider.provider_name} (SDK: {'installed' if sdk_ok else 'MISSING — pip install loom-agent[{provider.provider_name}]'})"
+        sdk_modules = {
+            "anthropic": "anthropic",
+            "deepseek": "openai",
+            "gemini": "google.generativeai",
+        }
+        module_name = sdk_modules.get(provider.provider_name, "")
+        try:
+            sdk_ok = bool(module_name) and importlib.util.find_spec(module_name) is not None
+        except (ImportError, ModuleNotFoundError, ValueError):
+            sdk_ok = False
+
+        extras = {"anthropic": "llm", "deepseek": "deepseek", "gemini": "gemini"}
+        extra = extras.get(provider.provider_name, "llm")
+        if sdk_ok:
+            sdk_msg = f"{provider.provider_name} (SDK: installed)"
+        else:
+            sdk_msg = (
+                f"{provider.provider_name} (SDK: MISSING — run: "
+                f"pip install 'loom-learn[{extra}]')"
+            )
         checks.append(("LLM extraction", sdk_ok, sdk_msg))
     else:
         checks.append(("LLM extraction", True, "keyword only (free, no API key)"))
 
     # 8. MCP protocol check
+    import importlib.util
+
     try:
-        from mcp.server.fastmcp import FastMCP
-        mcp_ok = True
-        mcp_msg = "FastMCP available"
-    except ImportError:
+        mcp_ok = importlib.util.find_spec("mcp.server.fastmcp") is not None
+    except (ImportError, ModuleNotFoundError):
         mcp_ok = False
+    if mcp_ok:
+        mcp_msg = "FastMCP available"
+    else:
         mcp_msg = "mcp package not installed"
     checks.append(("MCP protocol", mcp_ok, mcp_msg))
 
@@ -266,10 +284,12 @@ def cmd_preflight(config_path: str | None = None):
     print()
 
     # Resolve config path
-    if config_path:
-        cfg = Path(config_path).expanduser()
-    else:
-        cfg = _claude_config_path()
+    cfg = Path(config_path).expanduser() if config_path else _claude_config_path()
+    if cfg is None:
+        print("  [FAIL] Could not determine the Claude Desktop config path")
+        print("         Pass it explicitly: loom doctor --preflight --config-path <path>")
+        print()
+        return 1
 
     print(f"  Config: {cfg}")
     print()
@@ -280,7 +300,7 @@ def cmd_preflight(config_path: str | None = None):
     # 1. Config file exists and is valid JSON
     if not cfg.exists():
         print(f"  [FAIL] Config file not found: {cfg}")
-        print(f"         Run 'loom setup' first, or use --config-path to specify")
+        print("         Run 'loom setup' first, or use --config-path to specify")
         print()
         return 1
     else:
@@ -296,13 +316,12 @@ def cmd_preflight(config_path: str | None = None):
     mcp_servers = config_data.get("mcpServers", {})
     loom_config = mcp_servers.get("loom")
     if not loom_config:
-        print(f"  [FAIL] No 'loom' entry found in mcpServers")
-        print(f"         Run 'loom setup' and paste its output into the config.")
+        print("  [FAIL] No 'loom' entry found in mcpServers")
+        print("         Run 'loom setup' and paste its output into the config.")
         print()
         return 1
 
     command = loom_config.get("command", "")
-    args_list = loom_config.get("args", [])
     env_vars = loom_config.get("env", {})
 
     # 3. Python executable exists and is executable
@@ -310,15 +329,15 @@ def cmd_preflight(config_path: str | None = None):
     if not python_exe:
         python_exe = shutil.which("python3") or shutil.which("python") or ""
     if not python_exe:
-        print(f"  [FAIL] No Python command found in config")
-        print(f"         Set 'command' to your Python path (e.g., which python3)")
+        print("  [FAIL] No Python command found in config")
+        print("         Set 'command' to your Python path (e.g., which python3)")
         print()
         return 1
 
     exe_path = Path(python_exe)
     if not exe_path.is_file() and not shutil.which(python_exe):
         print(f"  [FAIL] Python not found: {python_exe}")
-        print(f"         Full path or install Python 3.10+ and retry.")
+        print("         Full path or install Python 3.10+ and retry.")
         print()
         return 1
     checks.append(("Python path", True, str(python_exe)))
@@ -334,11 +353,11 @@ def cmd_preflight(config_path: str | None = None):
         else:
             print(f"  [FAIL] Loom package not importable from {python_exe}")
             print(f"         {result.stderr.strip()}")
-            print(f"         Run: {python_exe} -m pip install loom-agent")
+            print(f"         Run: {python_exe} -m pip install loom-learn")
             print()
             return 1
     except subprocess.TimeoutExpired:
-        print(f"  [FAIL] Python import check timed out after 10s")
+        print("  [FAIL] Python import check timed out after 10s")
         print()
         return 1
     except Exception as e:
@@ -375,12 +394,12 @@ def cmd_preflight(config_path: str | None = None):
         if result.returncode == 0:
             checks.append(("MCP module", True, "loom.mcp.server loads"))
         else:
-            print(f"  [FAIL] loom.mcp.server failed to load")
+            print("  [FAIL] loom.mcp.server failed to load")
             print(f"         {result.stderr.strip()}")
             print()
             return 1
     except subprocess.TimeoutExpired:
-        print(f"  [FAIL] MCP module load check timed out after 10s")
+        print("  [FAIL] MCP module load check timed out after 10s")
         print()
         return 1
 
@@ -405,8 +424,6 @@ def cmd_preflight(config_path: str | None = None):
 
 def cmd_cloud_setup(args=None):
     """Create a Supabase-backed shared Loom database and print config."""
-    import urllib.request
-    import urllib.error
 
     print("=" * 60)
     print("  Loom Cloud Setup — Shared Team Memory")
@@ -446,8 +463,8 @@ def cmd_cloud_setup(args=None):
 
     # Run migrations
     try:
-        from loom.storage.postgres_store import PostgresStore
         from loom.config import StorageConfig
+        from loom.storage.postgres_store import PostgresStore
 
         config = StorageConfig(
             backend="postgres",
@@ -462,15 +479,15 @@ def cmd_cloud_setup(args=None):
             print("  Database: connection failed — check your URL and key")
             return
     except ImportError:
-        print("  psycopg2 not installed. Run: pip install loom-agent[cloud]")
+        print("  psycopg2 not installed. Run: pip install 'loom-learn[cloud]'")
         return
     except Exception as e:
         print(f"  Error: {e}")
         return
 
     # Generate API key
-    import secrets
     import hashlib
+    import secrets
     api_key = "loom_sk_" + secrets.token_hex(24)
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
@@ -531,6 +548,7 @@ def main():
         print("  cloud setup  Create a shared Supabase database for your team")
         print("  doctor       Check everything is working")
         print("  doctor --preflight  Validate MCP config before restart")
+        print("  version      Print the installed Loom version")
         print()
         print("Quick start (local):")
         print("  1. loom setup       — paste into Claude config")
@@ -561,6 +579,9 @@ def main():
             sys.exit(cmd_doctor())
     elif cmd == "init":
         cmd_setup()
+    elif cmd in ("version", "--version", "-V"):
+        import loom
+        print(f"loom-learn {loom.__version__}")
     else:
         print(f"Unknown command: {cmd}")
         print("Run 'loom' without arguments to see available commands.")
