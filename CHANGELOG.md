@@ -5,6 +5,92 @@ All notable changes to Loom will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-03
+
+Production-readiness release: a full audit of every module, with fixes for
+several bugs that silently disabled headline features. Upgrading is strongly
+recommended.
+
+### Fixed — critical
+- **Auto-hooks now actually fire.** The standard `python -m loom.mcp` entry
+  point wired tools directly to raw handlers, bypassing the hook layer
+  entirely — auto session-init, auto-observation, and secret redaction never
+  ran outside proxy mode. Every tool now routes through the hook layer.
+- **LLM extraction was broken for all three providers.** The shared prompt
+  builder referenced an undefined variable (`NameError` on every call),
+  the Anthropic call passed an invalid `output_config` parameter, and the
+  DeepSeek call used an unsupported `json_schema` response format. All
+  fixed; extraction failures are now logged to stderr instead of being
+  silently swallowed.
+- **A single malformed entry no longer destroys the rule store.** Loading a
+  rules file with one bad entry used to reset the store to empty in memory —
+  and the next save made the loss permanent. Loads now skip bad entries
+  individually, and corrupt files are quarantined (`*.corrupt-<timestamp>`),
+  never silently discarded.
+- **All store writes are now atomic** (temp file + fsync + rename) and taken
+  under an advisory file lock — a crash mid-write or two concurrent Loom
+  processes can no longer corrupt `rules.json` and friends.
+- **RBAC clearance is now enforced at read time.** `set_clearance` used to
+  store permissions that no read path ever checked. `recall_memory`,
+  `recall_relevant`, `export`, `timeline`, `export_timeline`, and `onboard`
+  now filter rules by the agent's identity (`LOOM_AGENT_ID` /
+  `LOOM_AGENT_ROLE` / `LOOM_AGENT_TEAMS`).
+- **`LOOM_PRIVATE_MODE=1` is now wired.** It blocks all write tools (teach,
+  learn, observe, …) while keeping read tools available. Previously it did
+  nothing.
+- **Secrets are now redacted on every write path.** `teach`, `learn`,
+  `reflect`, `amplify`, and `succession` could previously store raw API keys.
+  The redactor also gained patterns it embarrassingly lacked: Anthropic
+  `sk-ant-`, OpenAI `sk-proj-`, Stripe `sk_live_`, Slack `xox*`, GitHub
+  fine-grained PATs, GitLab, Google, SendGrid, npm, PyPI, Hugging Face,
+  JWTs, bearer tokens, connection-string passwords, and `key=value`
+  credential assignments.
+- **Redactor denial-of-service fixed.** The email pattern went quadratic on
+  large inputs (a 200 KB observation could stall the server for minutes).
+  All patterns now use bounded quantifiers.
+- **`succession(action="capture")` before `start` no longer reports a false
+  success** while silently discarding the captured knowledge.
+- **`timeline`/`export_timeline` with a limit returned the OLDEST entries**
+  instead of the most recent. "Key Recent Decisions" in onboarding packs was
+  showing ancient history.
+- **Retention/decay policies now actually run** (once per session). The
+  entire decay engine was dead code — no rule ever decayed.
+- Auto-observation calls passed an invalid `source=` argument (crashed and
+  was silently swallowed); rule-ID slug truncation silently merged distinct
+  rules (now disambiguated with a content hash); naive timestamps in stored
+  data no longer raise `TypeError`; Windows crash in timeline markdown
+  export (`%-d` is not portable); `loom doctor` printed a broken
+  f-string placeholder and required Python 3.11 while the package supports
+  3.10; four user-facing messages recommended installing the wrong package
+  (`loom-agent` instead of `loom-learn`); proxy read-loop failures now mark
+  the target dead and fail fast instead of hanging every call for 120 s.
+
+### Added
+- `loom version` command.
+- `LOOM_LLM_MODEL` to override the extraction model, `LOOM_AGENT_ID` /
+  `LOOM_AGENT_ROLE` / `LOOM_AGENT_TEAMS` for RBAC identity.
+- Timeouts (30 s) on all LLM provider calls.
+- First-call context injection even without a task argument — top
+  conventions are pre-loaded on the session's first tool call.
+- MIT license, `py.typed` marker, complete PyPI metadata, CI workflow
+  (ruff + mypy + pytest on 3.10–3.13 + macOS), PyPI Trusted Publishing.
+- 80 new tests (159 total): redactor formats + ReDoS guard, storage
+  corruption/atomicity, hook layer, RBAC enforcement, private mode, LLM
+  prompt/parser contracts, MCP transport round-trips including a
+  stdout-cleanliness guard. The suite is fully hermetic.
+
+### Changed
+- Default Anthropic model is now `claude-sonnet-5` (override with
+  `LOOM_LLM_MODEL`).
+- The rule store is cached with staleness detection instead of re-reading
+  and re-parsing the whole JSON file on every access.
+- Role → domain mapping single-sourced (23 roles); the `onboard` tool now
+  accepts every role that pack generation supports.
+- Unknown `LOOM_LLM_PROVIDER` values warn on stderr instead of silently
+  disabling LLM extraction.
+- Proxy targets (`LOOM_PROXY_TARGETS`) are now documented, validated, and
+  a single broken target no longer prevents startup.
+
 ## [0.3.0] — 2026-06-14
 
 ### Added

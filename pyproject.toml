@@ -1,16 +1,50 @@
 [project]
 name = "loom-learn"
-version = "0.3.1"
-description = "The memory layer for AI agents — shared learning across your entire organization. Observe, teach, reflect, auto-capture, auto-recall, onboard, succession, coaching amplification, per-observation RBAC, auditable timeline, and more."
+version = "0.4.0"
+description = "Shared memory for AI agents — an MCP server that auto-learns your team's conventions and injects them into every session."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Kaushik-hub306" }]
 requires-python = ">=3.10"
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "memory",
+    "claude",
+    "llm",
+    "knowledge-base",
+    "conventions",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "pyyaml>=6.0",
     "mcp>=1.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Kaushik-hub306/Loom"
+Repository = "https://github.com/Kaushik-hub306/Loom"
+Issues = "https://github.com/Kaushik-hub306/Loom/issues"
+Changelog = "https://github.com/Kaushik-hub306/Loom/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
 ]
 llm = [
     "anthropic>=0.30.0",
@@ -37,4 +71,27 @@ build-backend = "setuptools.build_meta"
 include = ["loom*"]
 
 [tool.setuptools.package-data]
-loom = ["storage/migrations/*.sql"]
+loom = ["storage/migrations/*.sql", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "loom/security/tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # long lines in prompts/tables are intentional
+    "B008",
+]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_unused_ignores = false
+follow_imports = "normal"
+exclude = ["build", "dist"]

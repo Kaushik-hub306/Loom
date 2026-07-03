@@ -1,6 +1,26 @@
-.venv/
+# Python
 __pycache__/
 *.pyc
-.loom/
-dist/
+*.pyo
 *.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Loom runtime state (never commit a live memory store's sensitive files)
+.loom/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Local tooling
+.gstack/

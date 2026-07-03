@@ -5,27 +5,25 @@ Two commands. That's it.
 ## 1. Install
 
 ```bash
-git clone https://github.com/Kaushik-hub306/loom.git
-cd loom
-pip install -e .
+pip install loom-learn
 ```
 
-**For DeepSeek LLM extraction (optional):**
+**Optional LLM extraction** (skip all of these to use free keyword extraction — no API key needed):
+
 ```bash
-pip install openai
+pip install 'loom-learn[llm]'       # Anthropic / Claude
+pip install 'loom-learn[deepseek]'  # DeepSeek
+pip install 'loom-learn[gemini]'    # Gemini
+pip install 'loom-learn[cloud]'     # Postgres/Supabase team backend
 ```
 
-**For Anthropic/Claude extraction (optional):**
+**From source (contributors):**
+
 ```bash
-pip install anthropic
+git clone https://github.com/Kaushik-hub306/Loom.git
+cd Loom
+pip install -e ".[dev]"
 ```
-
-**For Gemini extraction (optional):**
-```bash
-pip install google-generativeai
-```
-
-Skip all of these to use free keyword extraction — no API key needed.
 
 ## 2. Run setup
 
@@ -60,6 +58,7 @@ Paste into:
 |----|-----------|
 | macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
 
 ## 3. Restart Claude Desktop
 
@@ -81,13 +80,19 @@ All checks should show `[PASS]`. If anything fails, it tells you exactly what to
 
 ## Environment Variables
 
+The full table lives in the [README](README.md#environment-variables). The ones you'll most likely touch:
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `LOOM_PROJECT_ROOT` | No | `$PWD` | Where to create `.loom/` |
+| `LOOM_STORAGE_BACKEND` | No | `json` | `json` or `postgres` |
+| `LOOM_DATABASE_URL` | No | — | Postgres connection string (cloud mode) |
 | `ANTHROPIC_API_KEY` | No | — | Enable Claude extraction |
 | `LOOM_DEEPSEEK_API_KEY` | No | — | Enable DeepSeek extraction |
 | `GEMINI_API_KEY` | No | — | Enable Gemini extraction |
 | `LOOM_LLM_PROVIDER` | No | auto-detect | Force provider: `anthropic`, `deepseek`, `gemini` |
+| `LOOM_LLM_MODEL` | No | provider default | Override the extraction model |
+| `LOOM_PRIVATE_MODE` | No | `0` | `1` blocks all memory writes |
 
 ## Troubleshooting
 
