@@ -32,22 +32,23 @@ Tools (18 total):
  18. session_init       — Auto-preload context at session start (Glen-style)
 """
 
+import atexit
 import json
 import os
+import signal
 import sys
 import uuid
-import atexit
-import signal
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
 
-from loom.engine.rule_store import RuleStore, Rule
-from loom.engine.domain_extractor import DomainExtractor
 from loom.engine.decay_manager import DecayManager
+from loom.engine.domain_extractor import DomainExtractor
 from loom.engine.retention import RetentionPolicy
+from loom.engine.rule_store import Rule, RuleStore
+from loom.security.private_mode import should_skip_write
 from loom.security.rbac import ClearanceLevel
 from loom.security.redactor import redact_text
 
@@ -292,24 +293,14 @@ class TextContent:
 
 
 # ── Role → Domain mapping (for auto-recall & onboarding) ─────────────
+# Derived from loom.onboarding.packs.ROLE_DOMAIN_MAP — the single source
+# of truth. Previously two divergent maps lived here and in packs.py, so
+# roles valid for pack generation were rejected by the onboard tool.
+
+from loom.onboarding.packs import ROLE_DOMAIN_MAP as _PACKS_ROLE_MAP  # noqa: E402
 
 _ROLE_DOMAIN_MAP: dict[str, list[str]] = {
-    "backend-engineer": ["coding", "architecture", "testing", "security", "process"],
-    "frontend-dev": ["coding", "style", "testing", "documentation"],
-    "fullstack-dev": ["coding", "architecture", "style", "testing", "security", "process"],
-    "devops": ["process", "security", "architecture"],
-    "data-scientist": ["coding", "testing", "documentation"],
-    "data-engineer": ["coding", "architecture", "process", "security"],
-    "support-agent": ["general", "process", "documentation"],
-    "sales-agent": ["general", "process"],
-    "tech-lead": ["architecture", "process", "security", "coding"],
-    "engineering-manager": ["process", "architecture", "general"],
-    "security-engineer": ["security", "coding", "architecture"],
-    "qa-engineer": ["testing", "process", "coding"],
-    "new-grad": ["coding", "style", "testing", "process", "general"],
-    "tech-writer": ["documentation", "style", "general"],
-    "mobile-dev": ["coding", "style", "testing", "architecture"],
-    "ml-engineer": ["coding", "testing", "architecture", "process"],
+    role: list(domains) for role, (domains, _min_conf) in _PACKS_ROLE_MAP.items()
 }
 
 # ── Task → Domain mapping (for smart auto-recall) ─────────────────────
@@ -361,11 +352,69 @@ class LoomMCPServer:
         self._session_task: str = ""
         self._session_role: str = ""
         self._session_call_count: int = 0
+        self._store_cache: RuleStore | None = None
         # Tools excluded from auto-observation (reads, not writes)
         self._observe_excluded = frozenset({
             "recall_memory", "recall_relevant", "export", "export_timeline",
             "get_stats", "timeline", "onboard", "session_init", "observe",
         })
+        # Tools that mutate the store — blocked by LOOM_PRIVATE_MODE=1
+        self._write_tools = frozenset({
+            "learn", "teach", "reflect", "observe", "store_outcome",
+            "succession", "amplify", "retain", "set_clearance", "federate",
+        })
+
+    # ── Agent identity (for RBAC visibility filtering) ───────────────
+
+    def _agent_context(self) -> tuple[str, str, list[str]]:
+        """Resolve (agent_id, agent_role, agent_teams) for RBAC checks.
+
+        Configure via LOOM_AGENT_ID / LOOM_AGENT_ROLE / LOOM_AGENT_TEAMS
+        (comma-separated). The role falls back to the session role, then
+        to "member" so INTERNAL-clearance rules stay visible for a
+        default single-team deployment while CONFIDENTIAL+ rules are
+        properly restricted.
+        """
+        agent_id = os.environ.get("LOOM_AGENT_ID", "") or "agent"
+        agent_role = (
+            os.environ.get("LOOM_AGENT_ROLE", "")
+            or self._session_role
+            or "member"
+        )
+        teams_raw = os.environ.get("LOOM_AGENT_TEAMS", "")
+        agent_teams = [t.strip() for t in teams_raw.split(",") if t.strip()]
+        return agent_id, agent_role, agent_teams
+
+    def _filter_visible_rules(self, rules: list) -> list:
+        """Drop rules the current agent identity is not cleared to see.
+
+        This is the read-side enforcement of ``set_clearance`` — without
+        it, clearance levels would only ever be stored, never applied.
+        Fails open per-rule only if the RBAC engine itself errors.
+        """
+        rbac = self.rbac
+        check = getattr(rbac, "check_access", None)
+        if check is None:
+            return rules
+        agent_id, agent_role, agent_teams = self._agent_context()
+        visible = []
+        for r in rules:
+            if isinstance(r, dict):
+                rule_id = r.get("id") or r.get("rule_id") or ""
+            else:
+                rule_id = getattr(r, "id", None) or getattr(r, "rule_id", "") or ""
+            try:
+                if check(
+                    rule_id=rule_id,
+                    agent_id=agent_id,
+                    agent_role=agent_role,
+                    agent_teams=agent_teams,
+                ):
+                    visible.append(r)
+            except Exception as e:
+                print(f"[loom] rbac error: {e}", file=sys.stderr)
+                visible.append(r)
+        return visible
 
 
     def _init_postgres(self):
@@ -421,19 +470,20 @@ class LoomMCPServer:
                 (self.loom_dir / ".gitignore").write_text(
                     "tokens.json\nintegrity.json\naudit.jsonl\nprivate.jsonl\npermissions.json\n"
                     "timeline.jsonl\nretention.json\narchive.json\n"
+                    "*.lock\n*.corrupt-*\n*.tmp\n"
                 )
-        except PermissionError:
+        except PermissionError as e:
             raise PermissionError(
                 f"Cannot write to {self.loom_dir}. "
                 f"Check directory permissions (try: chmod 755 {self.loom_dir.parent}) "
                 f"or set LOOM_PROJECT_ROOT to a writable directory."
-            )
+            ) from e
         except OSError as e:
             raise OSError(
                 f"Cannot save to {self.loom_dir}: {e}. "
                 f"The disk may be full or the filesystem is read-only. "
                 f"Free up space or set LOOM_PROJECT_ROOT to a different location."
-            )
+            ) from e
         self._bootstrapped = True
 
         # Initialize Postgres connection on first bootstrap if configured
@@ -458,7 +508,15 @@ class LoomMCPServer:
         if self._storage_backend == "postgres" and self._pg_store:
             from loom.storage.adapters import PostgresRuleStore
             return PostgresRuleStore(self._pg_store)
-        return RuleStore(self.loom_dir / "rules.json")
+        # Cache the store instead of re-reading + re-parsing the whole
+        # JSON file on every property access (there are ~20 call sites
+        # per tool call). reload_if_stale() keeps us consistent with
+        # other Loom processes writing to the same project.
+        if self._store_cache is None:
+            self._store_cache = RuleStore(self.loom_dir / "rules.json")
+        else:
+            self._store_cache.reload_if_stale()
+        return self._store_cache
 
     @property
     def extractor(self) -> DomainExtractor:
@@ -660,7 +718,6 @@ class LoomMCPServer:
             observer.observe(
                 context=f"tool_call:{tool_name}",
                 observation=obs_text,
-                source=tool_name,
             )
             if observer.should_flush():
                 observer.auto_flush()
@@ -671,6 +728,17 @@ class LoomMCPServer:
 
     async def call_tool(self, name: str, arguments: dict) -> list:
         self._bootstrap()
+
+        # ── Pre-hook: private mode blocks all writes ────────────────
+        if name in self._write_tools and should_skip_write():
+            return [_text_result(
+                "## 🔒 Private Mode\n\n"
+                f"LOOM_PRIVATE_MODE=1 — the '{name}' tool writes to the "
+                "memory store, so this call was blocked. Read tools "
+                "(recall_memory, recall_relevant, export, get_stats, "
+                "timeline) remain available. Unset LOOM_PRIVATE_MODE to "
+                "re-enable learning."
+            )]
 
         # ── Pre-hook: auto session_init on first call ───────────────
         session_header = self._ensure_session_init(arguments)
@@ -734,15 +802,27 @@ class LoomMCPServer:
         self._session_id = str(uuid.uuid4())
         self._session_initialized = True
 
+        # Apply retention/decay policies once per session so tiered
+        # retention actually runs (previously this was dead code — rules
+        # never decayed no matter what the policies said).
+        try:
+            retention = self.retention
+            if hasattr(retention, "apply_retention_policies"):
+                decayed = retention.apply_retention_policies()
+                if decayed:
+                    print(
+                        f"[loom] retention: decayed {len(decayed)} stale "
+                        f"rule(s) at session start",
+                        file=sys.stderr,
+                    )
+        except Exception as e:
+            print(f"[loom] retention error: {e}", file=sys.stderr)
+
         # Use task/role from session_init or recall_relevant if available,
         # otherwise use generic defaults.
         task = self._session_task or args.get("task", "")
         role = self._session_role or args.get("role", "")
 
-        # If this is session_init or recall_relevant itself, don't
-        # inject context on top of its own response.
-        # But DO run ContextLoader in the background so subsequent
-        # calls benefit.
         try:
             loader = self.context_loader
             if task:
@@ -750,6 +830,32 @@ class LoomMCPServer:
                 formatted = loader.format_context_block(block)
                 self.auto_observer.on_session_start()
                 return formatted
+            # No task on the first call (e.g. the session opens with a
+            # bare `teach`) — still inject the top conventions so the
+            # "context pre-loaded on first tool call" promise holds.
+            top = self._filter_visible_rules(
+                self.store.get_active_rules(min_confidence=7)
+            )
+            if top:
+                top.sort(
+                    key=lambda r: (r.confidence, r.times_confirmed),
+                    reverse=True,
+                )
+                lines = [
+                    "<!-- LOOM:AUTO_CONTEXT -->",
+                    "## 🔍 Loom Session Context",
+                    "",
+                    "### ⚡ Top Reminders",
+                ]
+                for i, r in enumerate(top[:5], 1):
+                    lines.append(f"{i}. **{r.rule}** ({r.confidence}/10)")
+                lines.append("")
+                lines.append(
+                    "*Call `recall_relevant(task=...)` for task-specific "
+                    "context.*"
+                )
+                self.auto_observer.on_session_start()
+                return "\n".join(lines)
         except Exception as e:
             print(f"[loom] session error: {e}", file=sys.stderr)
 
@@ -788,7 +894,6 @@ class LoomMCPServer:
             observer.observe(
                 context=f"tool_call:{tool_name}",
                 observation=obs_text,
-                source=tool_name,
             )
 
             # Auto-flush if threshold reached
@@ -828,10 +933,32 @@ class LoomMCPServer:
 
     # ── Core learning handlers ────────────────────────────────────────
 
+    def _redact(self, text: str, where: str) -> str:
+        """Scrub secrets from *text* before it can reach storage.
+
+        Every write path goes through this — previously only the observe
+        paths redacted, so `teach`/`learn`/`reflect` could persist raw
+        API keys straight into rules.json.
+        """
+        if not text:
+            return text
+        try:
+            result = redact_text(text)
+            if result.secrets_found > 0:
+                print(
+                    f"[loom] Redacted {result.secrets_found} secret(s) "
+                    f"from {where}",
+                    file=sys.stderr,
+                )
+            return result.text
+        except Exception as e:
+            print(f"[loom] redactor error: {e}", file=sys.stderr)
+            return text
+
     def _handle_learn(self, args: dict) -> list:
-        context = args.get("context", "")
-        observation = args.get("observation", "")
-        lesson = args.get("lesson", "")
+        context = self._redact(args.get("context", ""), "learn.context")
+        observation = self._redact(args.get("observation", ""), "learn.observation")
+        lesson = self._redact(args.get("lesson", ""), "learn.lesson")
         domain = args.get("domain", "general")
         confidence = args.get("confidence", 5)
         source_type = args.get("source_type", "observation")
@@ -900,9 +1027,9 @@ class LoomMCPServer:
 
     def _handle_teach(self, args: dict) -> list:
         domain = args["domain"]
-        rule_text = args["rule"]
+        rule_text = self._redact(args["rule"], "teach.rule")
         rule_type = args["rule_type"]
-        example = args.get("example", "")
+        example = self._redact(args.get("example", ""), "teach.example")
         confidence = args.get("confidence", 7)
         retention_tier = args.get("retention", "standard")
 
@@ -949,8 +1076,12 @@ class LoomMCPServer:
 
     def _handle_reflect(self, args: dict) -> list:
         domain = args["domain"]
-        context = args.get("context", "")
-        patterns = args.get("patterns", [])
+        context = self._redact(args.get("context", ""), "reflect.context")
+        patterns = [
+            self._redact(p, "reflect.pattern")
+            for p in args.get("patterns", [])
+            if isinstance(p, str)
+        ]
 
         extractor = DomainExtractor(self.loom_dir / "domains")
         store = self.store
@@ -1002,7 +1133,10 @@ class LoomMCPServer:
         limit = args.get("limit")
 
         store = self.store
-        results = store.search_rules(query, domain=domain, min_confidence=min_conf, limit=limit)
+        results = store.search_rules(query, domain=domain, min_confidence=min_conf)
+        results = self._filter_visible_rules(results)
+        if limit:
+            results = results[:limit]
 
         if not results:
             return [_text_result("No rules found for that query.")]
@@ -1090,6 +1224,9 @@ class LoomMCPServer:
                 seen_ids.add(r.id)
                 deduped.append(r)
 
+        # Enforce clearance levels at read time
+        deduped = self._filter_visible_rules(deduped)
+
         results = deduped[:max_rules]
 
         if not results:
@@ -1097,16 +1234,16 @@ class LoomMCPServer:
             total_rules = len(store)
             if total_rules == 0:
                 return [_text_result(
-                    f"## 🔍 Welcome to Loom!\n\n"
-                    f"No conventions have been learned yet — this is a fresh project.\n\n"
-                    f"**Getting started:**\n"
-                    f"- Start coding and Loom will auto-observe patterns from your work\n"
-                    f"- Or use the `teach` tool to add your first convention directly:\n"
-                    f"  `teach(domain=\"coding\", rule=\"Use type hints everywhere\", "
-                    f"rule_type=\"type_safety\")`\n"
-                    f"- Use `learn` to extract rules from an observation or feedback\n\n"
-                    f"Once conventions are in the store, `recall_relevant` will find "
-                    f"them automatically based on your task."
+                    "## 🔍 Welcome to Loom!\n\n"
+                    "No conventions have been learned yet — this is a fresh project.\n\n"
+                    "**Getting started:**\n"
+                    "- Start coding and Loom will auto-observe patterns from your work\n"
+                    "- Or use the `teach` tool to add your first convention directly:\n"
+                    "  `teach(domain=\"coding\", rule=\"Use type hints everywhere\", "
+                    "rule_type=\"type_safety\")`\n"
+                    "- Use `learn` to extract rules from an observation or feedback\n\n"
+                    "Once conventions are in the store, `recall_relevant` will find "
+                    "them automatically based on your task."
                 )]
             return [_text_result(
                 f"## 🔍 No relevant conventions found for \"{task}\"\n\n"
@@ -1117,19 +1254,19 @@ class LoomMCPServer:
 
         # Format the output Glen-style
         lines = [
-            f"<!-- LOOM:AUTO_CONTEXT -->",
-            f"## 🔍 Relevant Conventions (from Loom)",
-            f"",
+            "<!-- LOOM:AUTO_CONTEXT -->",
+            "## 🔍 Relevant Conventions (from Loom)",
+            "",
             f"*Auto-loaded for task: \"{task}\"*",
-            f"",
+            "",
         ]
 
         # Top 3 most important
         top3 = results[:3]
         if top3:
             lines.append("### ⚡ Top Reminders")
-            for r in top3:
-                lines.append(f"1. **{r.rule}** ({r.confidence}/10)")
+            for i, r in enumerate(top3, 1):
+                lines.append(f"{i}. **{r.rule}** ({r.confidence}/10)")
             lines.append("")
 
         # Group by domain
@@ -1139,7 +1276,7 @@ class LoomMCPServer:
 
         lines.append("### By Domain")
         for domain in sorted(by_domain.keys()):
-            lines.append(f"")
+            lines.append("")
             lines.append(f"#### {domain}")
             for r in by_domain[domain]:
                 lines.append(f"- **{r.rule_type}** ({r.confidence}/10): {r.rule}")
@@ -1185,6 +1322,8 @@ class LoomMCPServer:
         content = args.get("content", "")
         domain = args.get("domain", "")
         sensitivity = args.get("sensitivity", "normal")
+        if sensitivity not in ("silent", "normal", "eager"):
+            sensitivity = "normal"
 
         observer = self.auto_observer
         observer.config.sensitivity = sensitivity
@@ -1247,6 +1386,7 @@ class LoomMCPServer:
             min_confidence=min_conf,
             rule_type=rule_type,
         )
+        rules = self._filter_visible_rules(rules)
 
         if not rules:
             return [_text_result("No rules to export.")]
@@ -1294,6 +1434,7 @@ class LoomMCPServer:
             date_from=date_from,
             limit=limit,
         )
+        entries = self._filter_visible_rules(entries)
 
         if not entries:
             return [_text_result("## Timeline\n\nNo entries found for the selected period.")]
@@ -1312,7 +1453,7 @@ class LoomMCPServer:
             return [_text_result("\n".join(lines))]
 
         # Markdown timeline
-        lines = [f"## 📅 Organization Timeline\n", f"Last {days} days\n"]
+        lines = ["## 📅 Organization Timeline\n", f"Last {days} days\n"]
 
         # Group by date
         by_date: dict[str, list] = {}
@@ -1358,7 +1499,7 @@ class LoomMCPServer:
             return [_text_result("## Stats\n\nTotal: 0 rules\n\nNothing learned yet.")]
 
         lines = [
-            f"## 📊 Loom Stats\n",
+            "## 📊 Loom Stats\n",
             f"**Project rules:** {stats['total']}",
             f"**Average confidence:** {stats['avg_confidence']:.1f}/10",
             f"**Extraction engine:** {self._extraction_status()}",
@@ -1381,7 +1522,7 @@ class LoomMCPServer:
         try:
             health = self.retention.get_health() if hasattr(self.retention, 'get_health') else {}
             if health:
-                lines.append(f"\n### Retention")
+                lines.append("\n### Retention")
                 lines.append(f"  - Permanent: {health.get('permanent', 0)}")
                 lines.append(f"  - Long-term: {health.get('long_term', 0)}")
                 lines.append(f"  - Standard: {health.get('standard', 0)}")
@@ -1394,7 +1535,7 @@ class LoomMCPServer:
             try:
                 org_stats = self.org_store.get_org_stats()
                 if org_stats and org_stats.get("total_rules", 0) > 0:
-                    lines.append(f"\n### Org-Wide")
+                    lines.append("\n### Org-Wide")
                     lines.append(f"  - Total org rules: {org_stats['total_rules']}")
                     lines.append(f"  - Projects: {', '.join(org_stats.get('by_project', {}).keys())}")
             except Exception as e:
@@ -1404,7 +1545,7 @@ class LoomMCPServer:
         try:
             summary = self.timeline.get_summary("weekly")
             if summary:
-                lines.append(f"\n### Recent Activity")
+                lines.append("\n### Recent Activity")
                 lines.append(f"  - Total entries: {summary.get('total_entries', 0)}")
                 lines.append(f"  - Avg confidence: {summary.get('avg_confidence', 0):.1f}")
         except Exception as e:
@@ -1459,7 +1600,8 @@ class LoomMCPServer:
             domain_rules = store.get_rules_by_domain(domain, min_confidence=5)
             all_rules.extend(domain_rules)
 
-        # Sort by confidence
+        # Enforce clearance levels, then sort by confidence
+        all_rules = self._filter_visible_rules(all_rules)
         all_rules.sort(key=lambda r: (r.confidence, r.times_confirmed), reverse=True)
 
         # Build the onboarding pack
@@ -1477,7 +1619,7 @@ class LoomMCPServer:
         lines = [
             f"# 🚀 Onboarding Pack: {role.replace('-', ' ').title()}",
             "",
-            f"*Welcome to the team! This is what our agents know about how we work.*",
+            "*Welcome to the team! This is what our agents know about how we work.*",
             "",
         ]
 
@@ -1545,7 +1687,7 @@ class LoomMCPServer:
             print(f"[loom] coaching error: {e}", file=sys.stderr)
 
         lines.append("---")
-        lines.append(f"*Generated by Loom — the memory layer for AI agents*")
+        lines.append("*Generated by Loom — the memory layer for AI agents*")
 
         # Persist the pack
         try:
@@ -1568,7 +1710,7 @@ class LoomMCPServer:
         action = args.get("action", "start")
 
         if action == "start":
-            session = self.succession.start_session(
+            self.succession.start_session(
                 departing_member=member,
                 role=role,
                 project=str(self.project_root.name),
@@ -1586,8 +1728,8 @@ class LoomMCPServer:
             )]
 
         elif action == "capture":
-            title = args.get("title", "")
-            detail = args.get("detail", "")
+            title = self._redact(args.get("title", ""), "succession.title")
+            detail = self._redact(args.get("detail", ""), "succession.detail")
             importance = args.get("importance", 5)
             category = args.get("category", "tribal_knowledge")
             domain = args.get("domain", "general")
@@ -1599,6 +1741,17 @@ class LoomMCPServer:
                 category=category,
                 domain=domain,
             )
+            if item is None:
+                # Previously this reported "Captured" and silently
+                # discarded the knowledge — the worst possible failure
+                # mode for a succession tool.
+                return [_text_result(
+                    "## ⚠️ Nothing Captured\n\n"
+                    "No active succession session. Start one first:\n"
+                    f"`succession(member=\"{member}\", role=\"{role}\", "
+                    f"action=\"start\")`\n\n"
+                    "Then repeat this capture call."
+                )]
             return [_text_result(
                 f"## ✅ Captured\n\n"
                 f"**Title:** {title}\n"
@@ -1657,7 +1810,8 @@ class LoomMCPServer:
         if not rule:
             return [_text_result(f"Rule not found: {rule_id}")]
 
-        amplified = self.amplifier.amplify(
+        amplification = self._redact(amplification, "amplify.amplification")
+        self.amplifier.amplify(
             rule_id=rule_id,
             coach=coach,
             coach_role=coach_role,
@@ -1766,6 +1920,7 @@ class LoomMCPServer:
             date_from=date_from,
             limit=limit,
         )
+        entries = self._filter_visible_rules(entries)
 
         if not entries:
             return [_text_result("## Timeline\n\nNo entries found. Start learning to build the timeline.")]
@@ -1774,7 +1929,7 @@ class LoomMCPServer:
             return [_text_result(json.dumps([e.to_dict() for e in entries], indent=2))]
 
         # Markdown timeline
-        lines = [f"## 📅 Organization Timeline\n"]
+        lines = ["## 📅 Organization Timeline\n"]
 
         if domain:
             lines.append(f"Domain: {domain} | ")
@@ -1829,7 +1984,6 @@ class LoomMCPServer:
         """Glen-style session initialization with pre-loaded context."""
         task = args.get("task", "")
         role = args.get("role", "")
-        project = args.get("project", str(self.project_root.name))
         max_rules = args.get("max_rules", 15)
         include_onboarding = args.get("include_onboarding", True)
 
@@ -1866,7 +2020,7 @@ class LoomMCPServer:
             summary = self.timeline.get_summary("weekly")
             if summary and summary.get("total_entries", 0) > 0:
                 lines.append("")
-                lines.append(f"---")
+                lines.append("---")
                 lines.append(f"*This week: {summary['total_entries']} things learned across the org.*")
         except Exception as e:
             print(f"[loom] timeline error: {e}", file=sys.stderr)
@@ -2147,6 +2301,21 @@ def main():
 
     mcp = FastMCP("loom")
 
+    async def _dispatch(name: str, args: dict) -> str:
+        """Route EVERY tool through call_tool().
+
+        call_tool() is where the hook layer lives: auto session-init on
+        the first call, auto-observation of write tools, secret
+        redaction, private-mode gating, and error wrapping. The previous
+        implementation called the raw _handle_* methods directly, which
+        silently disabled all of those headline behaviors in the
+        standard (non-proxy) deployment.
+        """
+        results = await loom.call_tool(name, args)
+        return "\n\n".join(
+            r.text for r in results if getattr(r, "text", "")
+        )
+
     # ── Core learning tools ──────────────────────────────────────
 
     @mcp.tool(name="learn", description="Learn from observation — report what happened and what was learned")
@@ -2158,11 +2327,10 @@ def main():
         confidence: int = 5,
         source_type: str = "observation",
     ) -> str:
-        result = loom._handle_learn({
+        return await _dispatch("learn", {
             "context": context, "observation": observation, "lesson": lesson,
             "domain": domain, "confidence": confidence, "source_type": source_type,
         })
-        return result[0].text
 
     @mcp.tool(name="teach", description="Teach a rule directly — inject a convention without extraction")
     async def teach(
@@ -2173,16 +2341,14 @@ def main():
         confidence: int = 7,
         retention: str = "standard",
     ) -> str:
-        result = loom._handle_teach({
+        return await _dispatch("teach", {
             "domain": domain, "rule": rule, "rule_type": rule_type,
             "example": example, "confidence": confidence, "retention": retention,
         })
-        return result[0].text
 
     @mcp.tool(name="reflect", description="Reflect on completed work — extract patterns from multiple observations")
     async def reflect(domain: str, patterns: list[str], context: str = "") -> str:
-        result = loom._handle_reflect({"domain": domain, "patterns": patterns, "context": context})
-        return result[0].text
+        return await _dispatch("reflect", {"domain": domain, "patterns": patterns, "context": context})
 
     # ── Recall tools ─────────────────────────────────────────────
 
@@ -2193,8 +2359,7 @@ def main():
         min_confidence: int = 1,
         limit: int | None = None,
     ) -> str:
-        result = loom._handle_recall({"query": query, "domain": domain, "min_confidence": min_confidence, "limit": limit})
-        return result[0].text
+        return await _dispatch("recall_memory", {"query": query, "domain": domain, "min_confidence": min_confidence, "limit": limit})
 
     @mcp.tool(name="recall_relevant", description="Auto-recall everything relevant to a task — Glen-style pre-loaded context")
     async def recall_relevant(
@@ -2203,8 +2368,7 @@ def main():
         max_rules: int = 15,
         include_org: bool = True,
     ) -> str:
-        result = loom._handle_recall_relevant({"task": task, "role": role, "max_rules": max_rules, "include_org": include_org})
-        return result[0].text
+        return await _dispatch("recall_relevant", {"task": task, "role": role, "max_rules": max_rules, "include_org": include_org})
 
     @mcp.tool(name="observe", description="Passively observe work — silent background capture like Glen")
     async def observe(
@@ -2213,8 +2377,7 @@ def main():
         domain: str = "",
         sensitivity: str = "normal",
     ) -> str:
-        result = loom._handle_observe({"context": context, "content": content, "domain": domain, "sensitivity": sensitivity})
-        return result[0].text
+        return await _dispatch("observe", {"context": context, "content": content, "domain": domain, "sensitivity": sensitivity})
 
     # ── Export / Stats ───────────────────────────────────────────
 
@@ -2226,12 +2389,11 @@ def main():
         rule_type: str = "",
         include_org: bool = True,
     ) -> str:
-        result = loom._handle_export({
+        return await _dispatch("export", {
             "domain": domain or None, "format": format,
             "min_confidence": min_confidence, "rule_type": rule_type or None,
             "include_org": include_org,
         })
-        return result[0].text
 
     @mcp.tool(name="export_timeline", description="Export the full organization timeline — Glen-style auditable history")
     async def export_timeline(
@@ -2241,21 +2403,18 @@ def main():
         days: int = 30,
         limit: int = 50,
     ) -> str:
-        result = loom._handle_export_timeline({
+        return await _dispatch("export_timeline", {
             "domain": domain or None, "project": project or None,
             "format": format, "days": days, "limit": limit,
         })
-        return result[0].text
 
     @mcp.tool(name="get_stats", description="Get statistics about learned rules including org-wide and retention data")
     async def get_stats(domain: str | None = None, include_org: bool = True) -> str:
-        result = loom._handle_stats({"domain": domain, "include_org": include_org})
-        return result[0].text
+        return await _dispatch("get_stats", {"domain": domain, "include_org": include_org})
 
     @mcp.tool(name="store_outcome", description="Store an outcome and learn from feedback (delegates to learn)")
     async def store_outcome(domain: str, outcome: str, feedback: str, source_url: str = "") -> str:
-        result = loom._handle_store({"domain": domain, "outcome": outcome, "feedback": feedback, "source_url": source_url})
-        return result[0].text
+        return await _dispatch("store_outcome", {"domain": domain, "outcome": outcome, "feedback": feedback, "source_url": source_url})
 
     # ── Glen-level tools ─────────────────────────────────────────
 
@@ -2266,11 +2425,10 @@ def main():
         custom_notes: str = "",
         include_succession: bool = True,
     ) -> str:
-        result = loom._handle_onboard({
+        return await _dispatch("onboard", {
             "role": role, "format": format,
             "custom_notes": custom_notes, "include_succession": include_succession,
         })
-        return result[0].text
 
     @mcp.tool(name="succession", description="Capture departing member's knowledge — Glen-style knowledge retention")
     async def succession(
@@ -2283,12 +2441,11 @@ def main():
         category: str = "tribal_knowledge",
         domain: str = "general",
     ) -> str:
-        result = loom._handle_succession({
+        return await _dispatch("succession", {
             "member": member, "role": role, "action": action,
             "title": title, "detail": detail, "importance": importance,
             "category": category, "domain": domain,
         })
-        return result[0].text
 
     @mcp.tool(name="amplify", description="Amplify a coach's guidance across the team — Glen-style coaching amplification")
     async def amplify(
@@ -2298,16 +2455,14 @@ def main():
         amplification: str,
         target_roles: list[str] | None = None,
     ) -> str:
-        result = loom._handle_amplify({
+        return await _dispatch("amplify", {
             "rule_id": rule_id, "coach": coach, "coach_role": coach_role,
             "amplification": amplification, "target_roles": target_roles or [],
         })
-        return result[0].text
 
     @mcp.tool(name="retain", description="Mark a rule for permanent retention — Glen-style infinite memory")
     async def retain(rule_id: str, reason: str) -> str:
-        result = loom._handle_retain({"rule_id": rule_id, "reason": reason})
-        return result[0].text
+        return await _dispatch("retain", {"rule_id": rule_id, "reason": reason})
 
     @mcp.tool(name="set_clearance", description="Set per-observation access control — Glen-style RBAC")
     async def set_clearance(
@@ -2316,11 +2471,10 @@ def main():
         allowed_roles: list[str] | None = None,
         allowed_teams: list[str] | None = None,
     ) -> str:
-        result = loom._handle_set_clearance({
+        return await _dispatch("set_clearance", {
             "rule_id": rule_id, "clearance": clearance,
             "allowed_roles": allowed_roles or [], "allowed_teams": allowed_teams or [],
         })
-        return result[0].text
 
     @mcp.tool(name="timeline", description="Query the auditable organization timeline")
     async def timeline(
@@ -2331,16 +2485,14 @@ def main():
         limit: int = 50,
         format: str = "markdown",
     ) -> str:
-        result = loom._handle_timeline({
+        return await _dispatch("timeline", {
             "domain": domain or None, "project": project or None,
             "agent": agent or None, "days": days, "limit": limit, "format": format,
         })
-        return result[0].text
 
     @mcp.tool(name="federate", description="Ingest rules from another project into the org-wide store")
     async def federate(project_path: str, project_name: str = "") -> str:
-        result = loom._handle_federate({"project_path": project_path, "project_name": project_name})
-        return result[0].text
+        return await _dispatch("federate", {"project_path": project_path, "project_name": project_name})
 
     @mcp.tool(name="session_init", description="Initialize a session with pre-loaded relevant context — Glen-style auto-context")
     async def session_init(
@@ -2350,11 +2502,10 @@ def main():
         max_rules: int = 15,
         include_onboarding: bool = True,
     ) -> str:
-        result = loom._handle_session_init({
+        return await _dispatch("session_init", {
             "task": task, "role": role, "project": project,
             "max_rules": max_rules, "include_onboarding": include_onboarding,
         })
-        return result[0].text
 
     # ── Register shutdown hooks ──────────────────────────────────
     atexit.register(loom._shutdown)

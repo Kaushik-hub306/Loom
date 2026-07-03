@@ -18,8 +18,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
-
 
 # ── JSON-RPC proxy core ────────────────────────────────────────────────
 
@@ -36,6 +34,7 @@ class ProxyTarget:
         self.process: asyncio.subprocess.Process | None = None
         self.tools: list[dict] = []       # tools/call → list
         self.server_info: dict | None = None
+        self.alive: bool = False
         self._pending: dict[int, asyncio.Future] = {}
         self._next_id = 0
         self._reader_task: asyncio.Task | None = None
@@ -51,6 +50,7 @@ class ProxyTarget:
             stderr=asyncio.subprocess.PIPE,
             env=merged_env,
         )
+        self.alive = True
 
         # Start reading responses in background
         self._reader_task = asyncio.create_task(self._read_loop())
@@ -88,7 +88,17 @@ class ProxyTarget:
         })
 
     async def _send(self, method: str, params: dict | None = None) -> dict:
-        """Send a JSON-RPC request and wait for the matching response."""
+        """Send a JSON-RPC request and wait for the matching response.
+
+        Fails fast when the target connection is dead instead of letting
+        every call hang for the full timeout.
+        """
+        if not self.alive or self.process is None or self.process.stdin is None:
+            return {"error": {
+                "code": -1,
+                "message": f"proxy target '{self.name}' is not running",
+            }}
+
         self._next_id += 1
         msg_id = self._next_id
         req = {
@@ -100,8 +110,16 @@ class ProxyTarget:
         future: asyncio.Future = asyncio.Future()
         self._pending[msg_id] = future
 
-        self.process.stdin.write((json.dumps(req) + "\n").encode())
-        await self.process.stdin.drain()
+        try:
+            self.process.stdin.write((json.dumps(req) + "\n").encode())
+            await self.process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            self._pending.pop(msg_id, None)
+            self._mark_dead(f"stdin write failed: {e}")
+            return {"error": {
+                "code": -1,
+                "message": f"proxy target '{self.name}' pipe broken: {e}",
+            }}
 
         try:
             return await asyncio.wait_for(future, timeout=120)
@@ -109,12 +127,34 @@ class ProxyTarget:
             self._pending.pop(msg_id, None)
             return {"error": {"code": -1, "message": f"timeout: {method}"}}
 
+    def _mark_dead(self, reason: str):
+        """Mark the target dead, fail all pending calls, and say why.
+
+        Previously the read loop died silently, leaving every subsequent
+        call to hang for its full 120s timeout with zero diagnostics.
+        """
+        if not self.alive:
+            return
+        self.alive = False
+        print(
+            f"[loom-proxy] target '{self.name}' connection lost: {reason}",
+            file=sys.stderr,
+        )
+        for msg_id, future in list(self._pending.items()):
+            if not future.done():
+                future.set_result({"error": {
+                    "code": -1,
+                    "message": f"proxy target '{self.name}' died: {reason}",
+                }})
+            self._pending.pop(msg_id, None)
+
     async def _read_loop(self):
         """Continuously read JSON-RPC responses from the subprocess."""
         try:
             while self.process and self.process.stdout:
                 line = await self.process.stdout.readline()
                 if not line:
+                    self._mark_dead("stdout closed (process exited)")
                     break
                 try:
                     msg = json.loads(line.decode())
@@ -126,8 +166,10 @@ class ProxyTarget:
                     future = self._pending.pop(msg_id)
                     if not future.done():
                         future.set_result(msg)
-        except Exception:
-            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._mark_dead(f"read loop crashed: {type(e).__name__}: {e}")
 
 
 # ── Proxy server ───────────────────────────────────────────────────────
@@ -142,26 +184,78 @@ class LoomProxy:
         self._tool_owner: dict[str, str] = {}  # tool_name → target_name
 
     async def start(self):
-        """Spawn all proxy targets."""
-        targets_json = os.environ.get("LOOM_PROXY_TARGETS", "{}")
-        try:
-            configs = json.loads(targets_json)
-        except json.JSONDecodeError:
-            configs = {}
+        """Spawn all proxy targets from ``LOOM_PROXY_TARGETS``.
+
+        Expected shape (same as an MCP client's server config)::
+
+            {"server-name": {"command": "npx", "args": ["-y", "some-mcp"],
+                             "env": {"KEY": "value"}}}
+        """
+        targets_json = os.environ.get("LOOM_PROXY_TARGETS", "")
+        configs: dict = {}
+        if targets_json:
+            try:
+                configs = json.loads(targets_json)
+                if not isinstance(configs, dict):
+                    print(
+                        "[loom-proxy] LOOM_PROXY_TARGETS must be a JSON "
+                        "object mapping server names to configs; got "
+                        f"{type(configs).__name__}. No targets loaded.",
+                        file=sys.stderr,
+                    )
+                    configs = {}
+            except json.JSONDecodeError as e:
+                print(
+                    f"[loom-proxy] LOOM_PROXY_TARGETS is not valid JSON "
+                    f"({e}). No targets loaded.",
+                    file=sys.stderr,
+                )
+        else:
+            print(
+                "[loom-proxy] LOOM_PROXY_TARGETS not set — running with "
+                "Loom's own tools only. To forward other MCP servers, set "
+                'LOOM_PROXY_TARGETS=\'{"name": {"command": "...", '
+                '"args": [...]}}\'.',
+                file=sys.stderr,
+            )
 
         for name, cfg in configs.items():
+            if not isinstance(cfg, dict) or "command" not in cfg:
+                print(
+                    f"[loom-proxy] target '{name}' missing required "
+                    f"'command' key — skipped.",
+                    file=sys.stderr,
+                )
+                continue
             target = ProxyTarget(
                 name=name,
                 command=cfg["command"],
                 args=cfg.get("args", []),
                 env=cfg.get("env"),
             )
-            await target.start()
+            try:
+                await target.start()
+            except Exception as e:
+                # One broken target must not take down the whole proxy.
+                print(
+                    f"[loom-proxy] failed to start target '{name}': "
+                    f"{type(e).__name__}: {e} — skipped.",
+                    file=sys.stderr,
+                )
+                continue
             self.targets[name] = target
 
             # Register which tools belong to which target
             for tool in target.tools:
                 self._tool_owner[tool["name"]] = name
+
+        if self.targets:
+            print(
+                f"[loom-proxy] forwarding {len(self._tool_owner)} tool(s) "
+                f"from {len(self.targets)} target(s): "
+                f"{', '.join(self.targets)}",
+                file=sys.stderr,
+            )
 
     async def stop(self):
         """Shut down all proxy targets."""
